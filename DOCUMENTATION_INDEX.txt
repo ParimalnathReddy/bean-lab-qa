@@ -1,0 +1,460 @@
+================================================================================
+                    COMPLETE DOCUMENTATION INDEX
+           HPCC LLM-Based Document QA System - Bean Lab
+================================================================================
+
+PROJECT LOCATION: /mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/
+
+================================================================================
+📚 START HERE
+================================================================================
+
+1. README.md
+   └─ Central navigation hub
+   └─ Quick links to all documentation
+   └─ Common tasks reference
+   └─ READ THIS FIRST!
+
+2. QUICK_START.md
+   └─ Get started in 5 minutes
+   └─ Installation commands
+   └─ Basic usage examples
+   └─ For new users
+
+================================================================================
+📖 CORE DOCUMENTATION (Read in this order)
+================================================================================
+
+Level 1: Getting Started
+├─ QUICK_START.md                    (5 min read)
+│  └─ Installation, setup, first run
+│
+├─ README.md                         (10 min read)
+│  └─ Project overview, navigation, common tasks
+│
+└─ config/HPCC_SETUP_GUIDE.md        (15 min read)
+   └─ HPCC modules, conda, SLURM, file systems
+
+Level 2: User Guide
+├─ README_PDF_PROCESSOR.md           (15 min read)
+│  └─ Complete user manual
+│  └─ All features explained
+│  └─ Configuration options
+│  └─ Troubleshooting
+│
+└─ PDF_ANALYSIS.md                   (10 min read)
+   └─ Dataset statistics (1,067 PDFs)
+   └─ File organization
+   └─ Sample commands
+
+Level 3: Developer Documentation
+├─ CODE_DOCUMENTATION.md             (30 min read)
+│  └─ Complete code architecture
+│  └─ Function reference
+│  └─ Algorithm explanations
+│  └─ Data flow diagrams
+│  └─ Error handling strategies
+│
+└─ src/pdf_processor_commented.py    (Code review)
+   └─ Line-by-line code comments
+   └─ Every function explained
+   └─ Algorithm walkthrough
+
+================================================================================
+💻 CODE FILES (All fully commented)
+================================================================================
+
+Production Code:
+├─ src/pdf_processor.py              (595 lines)
+│  └─ Main processor (use this for production)
+│  └─ Standard Python docstrings
+│
+├─ src/pdf_processor_commented.py    (800+ lines)
+│  └─ Educational version
+│  └─ Every line explained
+│  └─ Use for learning/understanding
+│
+└─ src/test_processor.py             (200+ lines)
+   └─ Test suite
+   └─ Dependency checker
+   └─ Sample processing
+
+Scripts:
+├─ scripts/setup_pdf_processing.sh
+│  └─ Automated setup script
+│  └─ Interactive installation
+│
+├─ scripts/analyze_and_copy_pdfs.sh
+│  └─ PDF analysis and organization
+│  └─ Progress tracking
+│
+├─ jobs/process_pdfs.sb
+│  └─ SLURM batch job script
+│  └─ 4-hour job, 8 CPUs, 32GB RAM
+│
+└─ config/module_setup.sh
+   └─ HPCC module loading
+   └─ Environment verification
+
+================================================================================
+📊 OUTPUT DOCUMENTATION
+================================================================================
+
+What the processor creates:
+
+1. data/processed_chunks.json
+   └─ Main output: 15,000-20,000 chunks
+   └─ Format: [{text, source_file, year_range, chunk_id, page, tokens}, ...]
+
+2. data/processing_metadata.json
+   └─ Statistics and configuration
+   └─ Success/failure counts
+   └─ Processing timestamp
+
+3. data/checkpoint_N.json
+   └─ Intermediate saves (every 50 PDFs)
+   └─ For recovery if crash occurs
+
+4. logs/processing.log
+   └─ Detailed processing log
+   └─ INFO/WARNING/ERROR messages
+
+5. logs/pdf_processing_JOBID.{out,err}
+   └─ SLURM job output
+   └─ Standard output and errors
+
+================================================================================
+🎯 QUICK REFERENCE BY TASK
+================================================================================
+
+TASK: I want to get started quickly
+READ: QUICK_START.md
+RUN:  bash scripts/setup_pdf_processing.sh
+
+TASK: I want to understand the code
+READ: CODE_DOCUMENTATION.md
+      src/pdf_processor_commented.py
+
+TASK: I need to set up HPCC environment
+READ: config/HPCC_SETUP_GUIDE.md
+RUN:  config/module_setup.sh
+
+TASK: I want to test before full run
+READ: README_PDF_PROCESSOR.md (Testing section)
+RUN:  python3 src/test_processor.py
+
+TASK: I need to submit SLURM job
+READ: README_PDF_PROCESSOR.md (SLURM section)
+RUN:  sbatch jobs/process_pdfs.sb
+
+TASK: I want to customize processing
+READ: README_PDF_PROCESSOR.md (Configuration section)
+EDIT: jobs/process_pdfs.sb or use command-line args
+
+TASK: Something went wrong
+READ: README_PDF_PROCESSOR.md (Troubleshooting section)
+      CODE_DOCUMENTATION.md (Error Handling section)
+CHECK: logs/processing.log
+
+TASK: I want to analyze the PDF dataset
+READ: PDF_ANALYSIS.md
+RUN:  bash scripts/analyze_and_copy_pdfs.sh
+
+================================================================================
+📋 DOCUMENTATION BY FILE TYPE
+================================================================================
+
+Markdown Documentation (.md files):
+├─ README.md                         - Main index (START HERE)
+├─ QUICK_START.md                    - 5-minute quick start
+├─ README_PDF_PROCESSOR.md           - Complete user guide
+├─ CODE_DOCUMENTATION.md             - Developer documentation
+├─ PDF_ANALYSIS.md                   - Dataset analysis
+└─ config/HPCC_SETUP_GUIDE.md        - HPCC setup guide
+
+Python Code (.py files):
+├─ src/pdf_processor.py              - Production code
+├─ src/pdf_processor_commented.py    - Educational code
+└─ src/test_processor.py             - Test suite
+
+Shell Scripts (.sh files):
+├─ scripts/setup_pdf_processing.sh   - Setup automation
+├─ scripts/analyze_and_copy_pdfs.sh  - PDF organization
+└─ config/module_setup.sh            - Module loading
+
+SLURM Scripts (.sb files):
+└─ jobs/process_pdfs.sb              - Batch processing
+
+Configuration Files:
+└─ requirements.txt                  - Python dependencies
+
+================================================================================
+🎓 LEARNING PATHS
+================================================================================
+
+Path 1: Complete Beginner
+1. README.md (overview)
+2. QUICK_START.md (setup)
+3. Run: bash scripts/setup_pdf_processing.sh
+4. Run: python3 src/test_processor.py
+5. README_PDF_PROCESSOR.md (learn features)
+6. Run: sbatch jobs/process_pdfs.sb
+
+Path 2: Developer
+1. README.md (overview)
+2. CODE_DOCUMENTATION.md (architecture)
+3. src/pdf_processor_commented.py (code review)
+4. Modify configuration as needed
+5. Test changes
+6. Deploy to production
+
+Path 3: HPCC User
+1. config/HPCC_SETUP_GUIDE.md (environment)
+2. Load modules or activate conda
+3. QUICK_START.md (setup)
+4. Submit SLURM job
+5. Monitor with squeue and logs
+
+Path 4: Researcher
+1. PDF_ANALYSIS.md (understand dataset)
+2. README_PDF_PROCESSOR.md (features)
+3. Process PDFs
+4. Analyze output chunks
+5. Build QA system on top
+
+================================================================================
+📊 DATASET INFORMATION
+================================================================================
+
+Location:  /mnt/research/BeanLab/Parimal/BEAN_LLM/Data/Data/
+Organized: 1961-2006/ (964 PDFs)
+           2007-2026/ (103 PDFs)
+Total:     1,067 PDFs
+Size:      ~347 MB
+Subject:   Agricultural/bean research papers
+Format:    PDF (DOI-based filenames)
+
+After Processing:
+Chunks:    15,000-20,000 (estimated)
+Size:      ~200-500 MB JSON
+Format:    Structured with metadata
+
+================================================================================
+⚡ PERFORMANCE EXPECTATIONS
+================================================================================
+
+Processing Time:
+├─ Without OCR: 1-2 hours for 1,067 PDFs
+└─ With OCR:    6-10 hours for 1,067 PDFs
+
+Resource Usage:
+├─ CPUs:   8 cores
+├─ Memory: 32 GB
+├─ Disk:   500 MB for output
+└─ Time:   4 hours SLURM limit
+
+Speed:
+├─ Without OCR: ~5-10 PDFs/minute
+└─ With OCR:    ~1-2 PDFs/minute
+
+================================================================================
+🔧 CUSTOMIZATION GUIDE
+================================================================================
+
+Want to change chunk size?
+└─ Edit: --chunk-size parameter (default: 512)
+└─ Effect: Larger = fewer chunks, more context
+           Smaller = more chunks, more precise
+
+Want to change overlap?
+└─ Edit: --chunk-overlap parameter (default: 50)
+└─ Effect: Larger = more context continuity
+           Smaller = more independent chunks
+
+Want to enable OCR?
+└─ Add: --use-ocr flag
+└─ Warning: 10x slower!
+
+Want to process subset?
+└─ Edit: --input-dir to point to subset directory
+
+Want more frequent checkpoints?
+└─ Edit: --batch-size parameter (default: 50)
+└─ Effect: More checkpoints = safer but slower
+
+================================================================================
+🐛 COMMON ISSUES & SOLUTIONS
+================================================================================
+
+Issue: "No PDFs found"
+├─ Check: data/pdfs/ directory exists
+├─ Check: PDFs are linked or copied
+└─ Solution: Run scripts/analyze_and_copy_pdfs.sh
+
+Issue: "ImportError: No module named 'PyPDF2'"
+├─ Check: Conda environment activated
+└─ Solution: pip install -r requirements.txt
+
+Issue: "Permission denied"
+├─ Check: File permissions (ls -la)
+└─ Solution: chmod +x scripts/*.sh
+
+Issue: "Out of memory"
+├─ Check: SLURM memory allocation
+└─ Solution: Increase --mem in jobs/process_pdfs.sb
+
+Issue: "Job timeout"
+├─ Check: Time limit in SLURM script
+└─ Solution: Increase --time in jobs/process_pdfs.sb
+
+================================================================================
+📞 GETTING HELP
+================================================================================
+
+Step 1: Check Documentation
+└─ Search this index for relevant file
+└─ Read documentation file
+└─ Try suggested solution
+
+Step 2: Check Logs
+└─ logs/processing.log (main log)
+└─ logs/pdf_processing_*.err (SLURM errors)
+└─ Look for ERROR or WARNING messages
+
+Step 3: Run Test
+└─ python3 src/test_processor.py
+└─ Check if dependencies are installed
+└─ Verify PDFs are accessible
+
+Step 4: Debug
+└─ Try processing single PDF manually
+└─ Check with sample commands in docs
+└─ Verify HPCC environment is set up
+
+================================================================================
+✅ VERIFICATION CHECKLIST
+================================================================================
+
+Before Processing:
+[ ] Read QUICK_START.md
+[ ] Dependencies installed (pip install -r requirements.txt)
+[ ] PDFs linked/copied to data/pdfs/
+[ ] Test passed (python3 src/test_processor.py)
+[ ] SLURM script reviewed (jobs/process_pdfs.sb)
+
+During Processing:
+[ ] Job submitted (sbatch jobs/process_pdfs.sb)
+[ ] Job running (squeue -u $USER)
+[ ] Logs monitored (tail -f logs/processing.log)
+[ ] Checkpoints saving (ls data/checkpoint_*.json)
+
+After Processing:
+[ ] Output exists (ls -lh data/processed_chunks.json)
+[ ] Metadata exists (ls -lh data/processing_metadata.json)
+[ ] Chunk count verified
+[ ] Sample chunks reviewed
+[ ] Logs checked for errors
+
+================================================================================
+🚀 NEXT STEPS AFTER PROCESSING
+================================================================================
+
+1. Verify Output
+   └─ Check file size and chunk count
+   └─ Review sample chunks
+   └─ Check metadata statistics
+
+2. Create Embeddings
+   └─ Use sentence-transformers
+   └─ Convert text chunks to vectors
+   └─ Save embeddings
+
+3. Set Up Vector Database
+   └─ ChromaDB or FAISS
+   └─ Index chunks by embeddings
+   └─ Enable semantic search
+
+4. Build QA System
+   └─ LangChain for orchestration
+   └─ LLM for answer generation
+   └─ Retrieval-augmented generation
+
+5. Deploy & Test
+   └─ Create query interface
+   └─ Test with sample questions
+   └─ Evaluate answer quality
+
+================================================================================
+📚 EXTERNAL REFERENCES
+================================================================================
+
+Python Libraries:
+├─ PyPDF2:     https://pypdf2.readthedocs.io/
+├─ tiktoken:   https://github.com/openai/tiktoken
+├─ tqdm:       https://tqdm.github.io/
+└─ pytesseract: https://github.com/tesseract-ocr/tesseract
+
+MSU HPCC:
+└─ Documentation: https://docs.icer.msu.edu/
+
+LLM Frameworks:
+├─ LangChain:  https://python.langchain.com/
+├─ ChromaDB:   https://docs.trychroma.com/
+└─ FAISS:      https://github.com/facebookresearch/faiss
+
+================================================================================
+📝 DOCUMENT VERSIONS
+================================================================================
+
+All Documentation: Version 1.0
+Last Updated:      2026-03-21
+Author:            MSU HPCC Bean Lab
+Project:           LLM-Based Document QA System
+
+================================================================================
+💡 TIPS FOR SUCCESS
+================================================================================
+
+1. Always test with small sample first
+2. Use SLURM for long-running jobs
+3. Monitor logs during processing
+4. Save checkpoints frequently
+5. Verify output before next step
+6. Read error messages carefully
+7. Check HPCC quota regularly
+8. Use scratch space for cache
+9. Document your modifications
+10. Ask for help when stuck
+
+================================================================================
+🎯 ONE-LINE COMMAND REFERENCE
+================================================================================
+
+Setup:
+  bash scripts/setup_pdf_processing.sh
+
+Test:
+  python3 src/test_processor.py
+
+Process (interactive):
+  python3 src/pdf_processor.py
+
+Process (SLURM):
+  sbatch jobs/process_pdfs.sb
+
+Monitor:
+  squeue -u $USER && tail -f logs/processing.log
+
+Verify:
+  ls -lh data/*.json && python3 -c "import json; print(len(json.load(open('data/processed_chunks.json'))))"
+
+================================================================================
+END OF DOCUMENTATION INDEX
+================================================================================
+
+For more information, start with: README.md or QUICK_START.md
+
+Project Location: /mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/
+Questions? Check the documentation files listed above.
+
+================================================================================

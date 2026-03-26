@@ -1,0 +1,82 @@
+#!/bin/bash
+#SBATCH --job-name=pdf_processing
+#SBATCH --time=04:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32GB
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/pdf_processing_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/pdf_processing_%j.err
+
+################################################################################
+# SLURM Job Script for PDF Processing
+# Process all PDF files and create chunks for vector database
+################################################################################
+
+echo "========================================"
+echo "PDF Processing Job"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "Start time: $(date)"
+echo "========================================"
+echo ""
+
+# Clear any conflicting modules first
+module purge
+
+# Load conda
+module load Miniforge3/24.3.0-0
+
+# Activate conda environment
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate bean_llm
+
+# Print environment info
+echo "Python version:"
+python3 --version
+echo ""
+
+echo "Working directory:"
+pwd
+echo ""
+
+# Set project directory
+PROJECT_DIR="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "$PROJECT_DIR"
+
+# Create necessary directories
+mkdir -p data logs
+
+# Set environment variables
+export PYTHONUNBUFFERED=1
+
+# Run PDF processor
+echo "Starting PDF processor..."
+echo ""
+
+python3 src/pdf_processor.py \
+    --input-dir "${PROJECT_DIR}/data/pdfs" \
+    --output-file "${PROJECT_DIR}/data/processed_chunks.json" \
+    --log-file "${PROJECT_DIR}/logs/processing_${SLURM_JOB_ID}.log" \
+    --chunk-size 512 \
+    --chunk-overlap 50 \
+    --batch-size 100
+
+EXIT_CODE=$?
+
+echo ""
+echo "========================================"
+echo "Processing complete!"
+echo "Exit code: $EXIT_CODE"
+echo "End time: $(date)"
+echo "========================================"
+
+# Print output file info if successful
+if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "Output files:"
+    ls -lh "${PROJECT_DIR}/data/processed_chunks.json" 2>/dev/null || echo "No output file found"
+    ls -lh "${PROJECT_DIR}/data/processing_metadata.json" 2>/dev/null || echo "No metadata file found"
+fi
+
+exit $EXIT_CODE

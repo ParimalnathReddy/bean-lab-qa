@@ -1,0 +1,116 @@
+#!/bin/bash
+#SBATCH --job-name=ollama_qa
+#SBATCH --time=04:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32GB
+#SBATCH --gpus=v100:1
+#SBATCH --partition=gpu
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/ollama_qa_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/ollama_qa_%j.err
+
+################################################################################
+# SLURM Job Script for Ollama-based QA System
+#
+# This script:
+# 1. Sets up Ollama environment
+# 2. Starts Ollama server
+# 3. Runs QA system with vector store
+# 4. Cleans up when done
+################################################################################
+
+echo "========================================"
+echo "Ollama QA System Job"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "GPU: $CUDA_VISIBLE_DEVICES"
+echo "Start time: $(date)"
+echo "========================================"
+echo ""
+
+# Project directory
+PROJECT_DIR="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "$PROJECT_DIR"
+
+# Create logs directory
+mkdir -p logs
+
+# Clear conflicting modules and load required ones
+module purge
+module load Ollama/0.15.5
+module load Miniforge3/24.3.0-0
+
+# Activate conda environment
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate bean_llm
+
+echo "Python version:"
+python3 --version
+echo "Ollama version: $(ollama --version)"
+echo ""
+
+# Fix libstdc++ compatibility
+export LD_LIBRARY_PATH=/mnt/scratch/kodumuru/conda/envs/bean_llm/lib:$LD_LIBRARY_PATH
+export PYTHONUNBUFFERED=1
+
+# Set Ollama environment variables
+export OLLAMA_MODELS="${PROJECT_DIR}/models/ollama"
+export OLLAMA_HOST="0.0.0.0:11434"
+export OLLAMA_NUM_PARALLEL=1
+
+echo "OLLAMA_MODELS=${OLLAMA_MODELS}"
+echo "OLLAMA_HOST=${OLLAMA_HOST}"
+echo ""
+
+# Start Ollama server
+echo "Starting Ollama server..."
+bash scripts/start_ollama.sh
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to start Ollama server"
+    exit 1
+fi
+
+echo "✓ Ollama server running"
+echo ""
+
+# Wait for server to fully initialize
+sleep 5
+
+# List available models
+echo "Available models:"
+ollama list
+echo ""
+
+# Check GPU
+echo "GPU Status:"
+nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv
+echo ""
+
+# Run QA system
+echo "Running QA system..."
+echo ""
+
+python3 src/qa_with_ollama.py \
+    --vector-db "${PROJECT_DIR}/vector_db" \
+    --chunks-file "${PROJECT_DIR}/data/processed_chunks.json" \
+    --model "llama3.1:8b" \
+    --output "${PROJECT_DIR}/data/qa_results_${SLURM_JOB_ID}.json" \
+    --log-file "${PROJECT_DIR}/logs/qa_${SLURM_JOB_ID}.log"
+
+EXIT_CODE=$?
+
+echo ""
+echo "========================================"
+echo "Job Complete!"
+echo "Exit code: $EXIT_CODE"
+echo "End time: $(date)"
+echo "========================================"
+
+# Cleanup
+echo "Stopping Ollama server..."
+pkill ollama 2>/dev/null
+echo "✓ Server stopped"
+
+exit $EXIT_CODE

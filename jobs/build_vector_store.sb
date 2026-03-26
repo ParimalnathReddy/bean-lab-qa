@@ -1,0 +1,92 @@
+#!/bin/bash
+#SBATCH --job-name=build_vector_store
+#SBATCH --time=01:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16GB
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/vector_store_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/vector_store_%j.err
+
+################################################################################
+# SLURM Job Script for Vector Store Building
+# Creates persistent ChromaDB vector store from embeddings
+################################################################################
+
+echo "========================================"
+echo "Vector Store Building Job"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "Start time: $(date)"
+echo "========================================"
+echo ""
+
+# Clear any conflicting modules first
+module purge
+
+# Load conda
+module load Miniforge3/24.3.0-0
+
+# Activate conda environment
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate bean_llm
+
+# Print environment info
+echo "Python version:"
+python3 --version
+echo ""
+
+# Check ChromaDB installation
+echo "Checking ChromaDB..."
+python3 -c "import chromadb; print(f'ChromaDB version: {chromadb.__version__}')" || echo "ChromaDB not found"
+echo ""
+
+# Set project directory
+PROJECT_DIR="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "$PROJECT_DIR"
+
+# Create necessary directories
+mkdir -p vector_db logs
+
+# Set environment variables
+export PYTHONUNBUFFERED=1
+export LD_LIBRARY_PATH=/mnt/scratch/kodumuru/conda/envs/bean_llm/lib:$LD_LIBRARY_PATH
+
+# Run vector store builder
+echo "Building vector store..."
+echo ""
+
+python3 src/build_vector_store.py \
+    --embeddings-file "${PROJECT_DIR}/data/embeddings.npy" \
+    --metadata-file "${PROJECT_DIR}/data/embeddings_metadata.json" \
+    --chunks-file "${PROJECT_DIR}/data/processed_chunks.json" \
+    --db-path "${PROJECT_DIR}/vector_db" \
+    --log-file "${PROJECT_DIR}/logs/vector_store_${SLURM_JOB_ID}.log" \
+    --collection-name "bean_research_docs" \
+    --batch-size 1000
+
+EXIT_CODE=$?
+
+echo ""
+echo "========================================"
+echo "Vector store building complete!"
+echo "Exit code: $EXIT_CODE"
+echo "End time: $(date)"
+echo "========================================"
+
+# Print output info if successful
+if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "Database location:"
+    ls -lh "${PROJECT_DIR}/vector_db/" 2>/dev/null || echo "Database directory not found"
+
+    echo ""
+    echo "Database size:"
+    du -sh "${PROJECT_DIR}/vector_db/" 2>/dev/null || echo "Could not calculate size"
+
+    echo ""
+    echo "Statistics file:"
+    cat "${PROJECT_DIR}/vector_db/database_statistics.json" 2>/dev/null || echo "Statistics file not found"
+fi
+
+exit $EXIT_CODE

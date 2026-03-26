@@ -1,0 +1,133 @@
+#!/bin/bash
+#SBATCH --job-name=generate_embeddings
+#SBATCH --time=02:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16GB
+#SBATCH --gpus=1
+#SBATCH --partition=gpu
+#SBATCH --constraint=v100
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/embeddings_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/embeddings_%j.err
+
+################################################################################
+# SLURM Job Script for Embedding Generation
+# Generates vector embeddings from processed PDF chunks
+################################################################################
+
+echo "========================================"
+echo "Embedding Generation Job"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "GPU: $CUDA_VISIBLE_DEVICES"
+echo "Start time: $(date)"
+echo "========================================"
+echo ""
+
+# Clear any conflicting modules first
+module purge
+
+# Load conda
+module load Miniforge3/24.3.0-0
+
+# Activate conda environment
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate bean_llm
+
+# Print environment info
+echo "Python version:"
+python3 --version
+echo ""
+
+echo "PyTorch version:"
+python3 -c "import torch; print(f'PyTorch: {torch.__version__}')"
+python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+python3 -c "import torch; print(f'CUDA version: {torch.version.cuda}')" 2>/dev/null || echo "CUDA info not available"
+python3 -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')" 2>/dev/null
+echo ""
+
+# Check GPU
+echo "GPU Information:"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+echo ""
+
+# Set project directory
+PROJECT_DIR="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "$PROJECT_DIR"
+
+# Create necessary directories
+mkdir -p data logs
+
+# Set environment variables
+export PYTHONUNBUFFERED=1
+
+# Fix libstdc++ compatibility issue (conda env needs newer version than system provides)
+export LD_LIBRARY_PATH=/mnt/scratch/kodumuru/conda/envs/bean_llm/lib:$LD_LIBRARY_PATH
+
+# Set cache directory to scratch to avoid filling home directory
+export HF_HOME=/mnt/scratch/$USER/llm_cache/huggingface
+export TRANSFORMERS_CACHE=/mnt/scratch/$USER/llm_cache/huggingface
+export SENTENCE_TRANSFORMERS_HOME=/mnt/scratch/$USER/llm_cache/sentence_transformers
+
+# Create cache directories
+mkdir -p $HF_HOME
+mkdir -p $TRANSFORMERS_CACHE
+mkdir -p $SENTENCE_TRANSFORMERS_HOME
+
+echo "Cache directory: $SENTENCE_TRANSFORMERS_HOME"
+echo ""
+
+# Run embedding generator
+echo "Starting embedding generation..."
+echo ""
+
+python3 src/generate_embeddings.py \
+    --input-file "${PROJECT_DIR}/data/processed_chunks.json" \
+    --output-embeddings "${PROJECT_DIR}/data/embeddings.npy" \
+    --output-metadata "${PROJECT_DIR}/data/embeddings_metadata.json" \
+    --log-file "${PROJECT_DIR}/logs/embeddings_${SLURM_JOB_ID}.log" \
+    --model "all-MiniLM-L6-v2" \
+    --batch-size 32 \
+    --device cuda
+
+EXIT_CODE=$?
+
+echo ""
+echo "========================================"
+echo "Embedding generation complete!"
+echo "Exit code: $EXIT_CODE"
+echo "End time: $(date)"
+echo "========================================"
+
+# Print output file info if successful
+if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "Output files:"
+    ls -lh "${PROJECT_DIR}/data/embeddings.npy" 2>/dev/null || echo "No embeddings file found"
+    ls -lh "${PROJECT_DIR}/data/embeddings_metadata.json" 2>/dev/null || echo "No metadata file found"
+
+    echo ""
+    echo "Embeddings shape and info:"
+    python3 -c "
+import numpy as np
+import json
+
+# Load embeddings
+emb = np.load('${PROJECT_DIR}/data/embeddings.npy')
+print(f'Embeddings shape: {emb.shape}')
+print(f'Dtype: {emb.dtype}')
+print(f'File size: {emb.nbytes / 1024 / 1024:.2f} MB')
+
+# Load metadata
+with open('${PROJECT_DIR}/data/embeddings_metadata.json') as f:
+    meta = json.load(f)
+
+print(f\"Total chunks: {meta['statistics']['total_chunks']}\")
+print(f\"Successful: {meta['statistics']['successful_embeddings']}\")
+print(f\"Processing time: {meta['statistics']['processing_time_seconds']:.2f}s\")
+print(f\"Speed: {meta['statistics']['chunks_per_second']:.2f} chunks/s\")
+" 2>/dev/null || echo "Could not load output files"
+fi
+
+exit $EXIT_CODE

@@ -1,0 +1,53 @@
+# ── Copyrighted PDFs ──────────────────────────────────────────────────────────
+data/pdfs/
+*.pdf
+
+# ── Large derived data files (regenerate by running the pipeline) ─────────────
+data/processed_chunks.json
+data/embeddings.npy
+data/embeddings_metadata.json
+data/processing_metadata.json
+data/qa_results_*.json
+data/checkpoint_*.json
+
+# ── Vector database (396MB, regenerate with build_vector_store.sb) ────────────
+vector_db/
+
+# ── Ollama models (4.9GB, download with scripts/download_llama_model.sh) ──────
+models/
+
+# ── SLURM logs (job-specific, not useful for others) ─────────────────────────
+logs/
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# ── Conda / virtual environments ──────────────────────────────────────────────
+env/
+venv/
+.env
+*.egg-info/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Secrets and credentials ───────────────────────────────────────────────────
+.env
+*.key
+*.pem
+secrets/
+config/secrets.yaml
+
+# ── OS junk ───────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ── HuggingFace cache (if ever stored locally in project) ─────────────────────
+.cache/
+huggingface/
