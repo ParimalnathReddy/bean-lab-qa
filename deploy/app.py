@@ -192,9 +192,6 @@ with gr.Blocks(
 
     gr.Markdown("""
     ---
-    **Answer labels:** SUPPORTED = directly stated in papers | PARTIALLY_SUPPORTED = some evidence |
-    INFERRED = logically follows | UNSUPPORTED = limited evidence (best-effort answer)
-
     **Database:** 1,067 bean/legume research papers (1961–2026) | Bean Lab, MSU |
     [GitHub](https://github.com/ParimalnathReddy/bean-lab-qa)
     """)
