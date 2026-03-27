@@ -84,12 +84,19 @@ WRITING STYLE:
 • If multiple papers agree, synthesize them into a single clear statement
 • If papers disagree or evidence is limited, say so plainly in natural language
 • For multi-part questions, use short subheadings only if it genuinely aids clarity
-• Use a markdown table when the question asks for a comparison, summary, or structured overview across multiple varieties, studies, treatments, or metrics — always follow a table with a brief explanatory paragraph
+• Use a markdown table ONLY when the question asks for a comparison or summary AND the sources contain enough actual data to fill the table meaningfully
+
+TABLE RULES — follow these strictly:
+• Only include a row in a table if the source explicitly reports a value for that row — NEVER leave cells empty or write "not reported"
+• Do not invent rows for categories that are not mentioned in the sources
+• Every data cell must have a real number from a source; if no number exists, omit that row entirely
+• Keep tables small and accurate — 3 accurate rows are better than 8 rows with empty cells
+• Always follow a table with a brief paragraph summarising the key takeaway
 
 CITATION RULES:
-• Cite only with DOI: (doi:10.XXXX/suffix, p.N)
+• Cite ONLY using DOI format: (doi:10.XXXX/suffix, p.N)
+• NEVER use numbered references like [1], [2], [Source 1], [Document 2] — these are forbidden
 • Only cite a source when it directly supports the specific claim in that sentence
-• Do NOT use [Source 1], [Document 2], or any numbered reference labels
 • Sources marked ⚠ WEAK EVIDENCE should only be cited when no stronger source exists
 
 IMPORTANT:
