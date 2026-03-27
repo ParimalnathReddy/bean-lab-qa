@@ -101,17 +101,25 @@ def call_llm(messages: list) -> str:
 # ── Main QA function ──────────────────────────────────────────────────────────
 
 # Distance above this means the corpus has nothing relevant — skip LLM entirely.
-# With L2-normalized embeddings: dist=1.1 ≈ cosine similarity 0.40 (very weak).
 NO_MATCH_THRESHOLD = 1.10
 
+_GREETINGS = {"hello", "hi", "hey", "howdy", "hiya", "greetings", "good morning",
+              "good afternoon", "good evening", "how are you", "what's up", "whats up"}
+
+_WELCOME_MSG = (
+    "Hello! I'm the Bean Lab Research Assistant. I can answer questions about "
+    "bean and legume crop science based on 1,000+ research papers (1961–2026).\n\n"
+    "Try asking something like:\n"
+    "• What diseases affect bean crops and how can they be managed?\n"
+    "• How does drought stress affect bean yield?\n"
+    "• What nitrogen fixation rates have been reported for common bean?\n"
+    "• How does intercropping beans with maize affect productivity?"
+)
+
 _OUT_OF_SCOPE_MSG = (
-    "This system only answers questions about bean and legume crop science.\n\n"
-    "No relevant research was found for your input. Try asking about:\n"
-    "• Bean diseases and management (rust, white mold, BCMV, bacterial blight)\n"
-    "• Drought or heat stress effects on bean yield\n"
-    "• Nitrogen fixation rates in common bean\n"
-    "• Breeding for disease resistance or yield improvement\n"
-    "• Intercropping, soil nutrition, or agronomic management"
+    "I couldn't find relevant research for that question in the Bean Lab database. "
+    "This system is specialized for bean and legume crop science — try asking about "
+    "bean diseases, drought tolerance, nitrogen fixation, breeding, or agronomic management."
 )
 
 
@@ -122,6 +130,11 @@ def answer_question(question: str, year_filter: str) -> tuple:
         return "", ""
     if retriever is None:
         return "System not ready — ChromaDB or embedder failed to load.", ""
+
+    # Greetings get a friendly welcome, not a rejection
+    q_lower = question.strip().lower().rstrip("!?. ")
+    if q_lower in _GREETINGS:
+        return _WELCOME_MSG, ""
 
     year_range = None if year_filter == "All years" else year_filter
 
