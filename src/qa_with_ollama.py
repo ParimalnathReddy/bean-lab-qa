@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-QA System using ChromaDB vector store + Ollama LLM
-Retrieval-Augmented Generation (RAG) for Bean Lab research documents
+Batch QA system using ChromaDB vector store + Ollama LLM.
+RAG pipeline for Bean Lab research documents.
+
+Improvements over v1:
+  - Uses BeanRetriever (query expansion + cross-encoder reranking)
+  - Evidence-first prompting with confidence labels
+  - Soft failure: always attempts answer, records confidence level
+  - n_candidates=20, top_k=10 by default
 """
 
 import os
+import sys
 import json
 import logging
 import argparse
@@ -16,8 +23,13 @@ from typing import List, Dict, Optional
 import chromadb
 from chromadb.config import Settings
 
+# Add src/ to path so retriever and prompts can be imported
+sys.path.insert(0, str(Path(__file__).parent))
+from retriever import BeanRetriever
+from prompts import build_ollama_prompt, format_references
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 def setup_logging(log_file: str) -> logging.Logger:
     Path(log_file).parent.mkdir(parents=True, exist_ok=True)
@@ -32,67 +44,19 @@ def setup_logging(log_file: str) -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-# ── DOI helper ────────────────────────────────────────────────────────────────
-
-def filename_to_doi(filename: str) -> str:
-    """Convert stored filename back to DOI.
-    e.g. '10.2135_cropsci2004.1799.pdf' → '10.2135/cropsci2004.1799'
-    """
-    name = filename.replace(".pdf", "")
-    parts = name.split("_", 1)
-    if len(parts) == 2 and parts[0].startswith("10."):
-        return f"{parts[0]}/{parts[1]}"
-    return name
-
-
-# ── Vector Store ──────────────────────────────────────────────────────────────
+# ── ChromaDB ──────────────────────────────────────────────────────────────────
 
 def load_vector_store(db_path: str, collection_name: str = "bean_research_docs"):
-    """Load ChromaDB collection."""
     client = chromadb.PersistentClient(
         path=db_path,
         settings=Settings(anonymized_telemetry=False),
     )
-    collection = client.get_collection(name=collection_name)
-    return collection
-
-
-def retrieve_context(collection, query: str, n_results: int = 5, year_range: Optional[str] = None) -> List[Dict]:
-    """
-    Retrieve top-k relevant chunks from ChromaDB using the query text.
-    Optionally filter by year_range ('1961-2006' or '2007-2026').
-    """
-    where = {"year_range": year_range} if year_range else None
-
-    results = collection.query(
-        query_texts=[query],
-        n_results=n_results,
-        where=where,
-        include=["documents", "metadatas", "distances"],
-    )
-
-    chunks = []
-    for doc, meta, dist in zip(
-        results["documents"][0],
-        results["metadatas"][0],
-        results["distances"][0],
-    ):
-        source = meta.get("source_file", "unknown")
-        chunks.append({
-            "text": doc,
-            "source": source,
-            "doi": filename_to_doi(source),
-            "year_range": meta.get("year_range", "unknown"),
-            "page": meta.get("page_number", "unknown"),
-            "distance": round(dist, 4),
-        })
-    return chunks
+    return client.get_collection(name=collection_name)
 
 
 # ── Ollama ────────────────────────────────────────────────────────────────────
 
 def check_ollama_server(host: str = "localhost:11434") -> bool:
-    """Check if Ollama server is running."""
     try:
         response = requests.get(f"http://{host}/api/tags", timeout=5)
         return response.status_code == 200
@@ -101,223 +65,207 @@ def check_ollama_server(host: str = "localhost:11434") -> bool:
 
 
 def query_ollama(prompt: str, model: str = "llama3.1:8b", host: str = "localhost:11434") -> str:
-    """Send prompt to Ollama and return response."""
     url = f"http://{host}/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.1,   # low temp for factual answers
-            "num_predict": 512,   # max tokens in response
+            "temperature": 0.1,
+            "num_predict": 1024,
         },
     }
-    response = requests.post(url, json=payload, timeout=120)
+    response = requests.post(url, json=payload, timeout=180)
     response.raise_for_status()
     return response.json()["response"].strip()
 
 
-# ── RAG Pipeline ──────────────────────────────────────────────────────────────
-
-DISTANCE_THRESHOLD = 0.85
-
-
-def build_prompt(question: str, context_chunks: List[Dict]) -> str:
-    """Build RAG prompt from question + retrieved context."""
-    context_text = ""
-    for i, chunk in enumerate(context_chunks, 1):
-        relevance = "LOW RELEVANCE - do not cite" if chunk["distance"] > DISTANCE_THRESHOLD else f"relevance score={chunk['distance']}"
-        context_text += f"\n[DOI: {chunk['doi']} | {chunk['year_range']} | Page {chunk['page']} | {relevance}]\n"
-        context_text += chunk["text"] + "\n"
-
-    prompt = f"""You are a precise scientific research assistant that answers questions strictly from retrieved documents.
-
-RETRIEVAL RULES:
-- Sources marked "LOW RELEVANCE" — do not cite them
-- Never use off-topic documents to answer a question
-
-ANSWERING RULES:
-- Check ALL retrieved sources before saying information is unavailable
-- Never contradict yourself within the same response
-- Always include specific numbers, units, and scales from tables when relevant
-- Always compare values between entries rather than reporting single values in isolation
-- Only cite sources that directly support your specific claim
-
-FORMAT RULES:
-- State the direct answer first
-- Then provide supporting data
-- Cite sources using their full DOI in parentheses, e.g. (doi:10.2135/cropsci2004.1799, p.3)
-- Do NOT use generic labels like [Source 1] or [Source 2] — always use the actual DOI
-- Flag any uncertainty clearly at the end
-
-CONTEXT:
-{context_text}
-
-QUESTION: {question}
-
-ANSWER:"""
-    return prompt
-
+# ── QA Pipeline ───────────────────────────────────────────────────────────────
 
 def answer_question(
     question: str,
-    collection,
+    retriever: BeanRetriever,
     model: str,
     host: str,
-    n_results: int = 5,
+    top_k: int = 10,
+    n_candidates: int = 20,
     year_range: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
 ) -> Dict:
-    """Full RAG pipeline: retrieve → build prompt → generate answer."""
+    """Full RAG pipeline: expand → retrieve → rerank → generate."""
     if logger:
         logger.info(f"Question: {question}")
 
-    # Retrieve context
-    start = time.time()
-    chunks = retrieve_context(collection, question, n_results=n_results, year_range=year_range)
-    retrieval_time = time.time() - start
+    # Retrieve with expansion and reranking
+    t0 = time.time()
+    chunks, confidence = retriever.retrieve(
+        question,
+        top_k=top_k,
+        year_range=year_range,
+        n_candidates=n_candidates,
+    )
+    retrieval_time = time.time() - t0
 
     if logger:
-        logger.info(f"Retrieved {len(chunks)} chunks in {retrieval_time:.2f}s")
+        logger.info(f"Confidence: {confidence} | Retrieved {len(chunks)} chunks in {retrieval_time:.2f}s")
         for i, c in enumerate(chunks, 1):
-            logger.info(f"  [{i}] {c['source']} (distance={c['distance']})")
+            rerank = f" rerank={c['rerank_score']:.2f}" if c.get("rerank_score") is not None else ""
+            logger.info(f"  [{i}] {c['doi']} p.{c['page']} dist={c['distance']}{rerank}")
 
-    # If all sources are above threshold, topic is not in database
-    if all(c["distance"] > DISTANCE_THRESHOLD for c in chunks):
-        return {
-            "question": question,
-            "answer": "This topic is not in my database. Please upload the relevant documents and try again.",
-            "sources": chunks,
-            "retrieval_time_s": round(retrieval_time, 3),
-            "generation_time_s": 0.0,
-            "model": model,
-            "year_filter": year_range,
-        }
+    # Build prompt with evidence-first structure
+    prompt = build_ollama_prompt(question, chunks, confidence)
 
-    # Build prompt
-    prompt = build_prompt(question, chunks)
-
-    # Generate answer
-    start = time.time()
-    answer = query_ollama(prompt, model=model, host=host)
-    generation_time = time.time() - start
-
-    if logger:
-        logger.info(f"Generated answer in {generation_time:.2f}s")
+    # Generate answer — always attempt, never hard-fail
+    t1 = time.time()
+    try:
+        answer = query_ollama(prompt, model=model, host=host)
+    except Exception as e:
+        answer = f"[LLM ERROR] {e}. Retrieval succeeded with confidence={confidence}."
+        if logger:
+            logger.error(f"LLM call failed: {e}")
+    generation_time = time.time() - t1
 
     return {
         "question": question,
         "answer": answer,
-        "sources": chunks,
+        "confidence": confidence,
+        "sources": [
+            {
+                "doi": c["doi"],
+                "page": c["page"],
+                "year_range": c["year_range"],
+                "section": c.get("section", ""),
+                "distance": c["distance"],
+                "rerank_score": c.get("rerank_score"),
+            }
+            for c in chunks
+        ],
         "retrieval_time_s": round(retrieval_time, 3),
         "generation_time_s": round(generation_time, 3),
         "model": model,
         "year_filter": year_range,
+        "n_candidates": n_candidates,
+        "top_k": top_k,
     }
 
 
 # ── Default Questions ─────────────────────────────────────────────────────────
+# Covers 5 question types: direct lookup, synthesis, inference, critique, multi-part
 
 DEFAULT_QUESTIONS = [
+    # Direct lookup
     "What are the main diseases affecting bean crops and how can they be managed?",
     "What nitrogen fixation rates have been reported for common bean varieties?",
-    "How does drought stress affect bean yield and what tolerance mechanisms exist?",
-    "What are the most effective herbicides used in bean cultivation?",
-    "How has bean breeding improved resistance to bean common mosaic virus?",
     "What soil pH and nutrient conditions are optimal for bean production?",
-    "What are the yield differences between determinate and indeterminate bean varieties?",
+
+    # Cross-section synthesis
+    "How does drought stress affect bean yield and what tolerance mechanisms exist?",
+    "How has bean breeding improved resistance to bean common mosaic virus?",
     "How does intercropping beans with maize affect productivity?",
+
+    # Inference / cause-effect
+    "Why is pyramiding rust resistance genes from Middle American and Andean gene pools considered important?",
+    "What explains the yield advantage of indeterminate over determinate bean varieties?",
+
+    # Critique / limitations
+    "What are the known limitations or challenges in breeding white mold resistance in dry beans?",
+    "What gaps remain in understanding nitrogen fixation efficiency in common bean?",
+
+    # Multi-part
+    "What are the most effective herbicides used in bean cultivation, how do they work, and what are their risks?",
+    "Compare the drought tolerance mechanisms of tepary bean versus common bean and explain the breeding implications.",
 ]
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="RAG QA system for Bean Lab research documents")
-    parser.add_argument("--vector-db", required=True, help="Path to ChromaDB directory")
-    parser.add_argument("--chunks-file", help="Path to processed_chunks.json (unused, kept for compatibility)")
-    parser.add_argument("--model", default="llama3.1:8b", help="Ollama model name")
-    parser.add_argument("--output", required=True, help="Output JSON file for results")
-    parser.add_argument("--log-file", required=True, help="Log file path")
-    parser.add_argument("--ollama-host", default="localhost:11434", help="Ollama server host:port")
-    parser.add_argument("--n-results", type=int, default=5, help="Number of chunks to retrieve per query")
-    parser.add_argument("--questions-file", help="JSON file with list of questions (optional)")
+    parser = argparse.ArgumentParser(description="Batch RAG QA for Bean Lab documents")
+    parser.add_argument("--vector-db", required=True)
+    parser.add_argument("--model", default="llama3.1:8b")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--log-file", required=True)
+    parser.add_argument("--ollama-host", default="localhost:11434")
+    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--n-candidates", type=int, default=20)
+    parser.add_argument("--questions-file", help="JSON list of questions")
+    parser.add_argument("--chunks-file", help="Unused; kept for compatibility")
     args = parser.parse_args()
 
     logger = setup_logging(args.log_file)
     logger.info("=" * 70)
-    logger.info("Bean Lab RAG QA System")
-    logger.info("=" * 70)
+    logger.info("Bean Lab Batch QA System v2")
     logger.info(f"Vector DB:    {args.vector_db}")
     logger.info(f"Model:        {args.model}")
-    logger.info(f"Ollama host:  {args.ollama_host}")
+    logger.info(f"top_k:        {args.top_k}  |  n_candidates: {args.n_candidates}")
+    logger.info("=" * 70)
 
-    # Check Ollama
-    logger.info("Checking Ollama server...")
     if not check_ollama_server(args.ollama_host):
         logger.error(f"Ollama server not reachable at {args.ollama_host}")
         raise SystemExit(1)
-    logger.info("✓ Ollama server is running")
+    logger.info("✓ Ollama server running")
 
-    # Load vector store
-    logger.info("Loading ChromaDB vector store...")
     collection = load_vector_store(args.vector_db)
     logger.info(f"✓ Collection loaded: {collection.count()} chunks")
 
-    # Load questions
+    retriever = BeanRetriever(collection)
+    retriever._load_cross_encoder()
+
     if args.questions_file and Path(args.questions_file).exists():
         with open(args.questions_file) as f:
             questions = json.load(f)
-        logger.info(f"Loaded {len(questions)} questions from {args.questions_file}")
     else:
         questions = DEFAULT_QUESTIONS
-        logger.info(f"Using {len(questions)} default test questions")
+    logger.info(f"Running {len(questions)} questions")
 
-    # Run QA
     results = []
     for i, question in enumerate(questions, 1):
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Question {i}/{len(questions)}")
-
+        logger.info(f"\n{'='*60}\nQuestion {i}/{len(questions)}")
         try:
             result = answer_question(
                 question=question,
-                collection=collection,
+                retriever=retriever,
                 model=args.model,
                 host=args.ollama_host,
-                n_results=args.n_results,
+                top_k=args.top_k,
+                n_candidates=args.n_candidates,
                 logger=logger,
             )
             results.append(result)
 
-            # Print to stdout
             print(f"\n{'='*60}")
             print(f"Q{i}: {question}")
+            print(f"Confidence: {result['confidence']}")
             print(f"{'='*60}")
-            print(f"A: {result['answer']}")
-            print(f"\nSources used:")
+            print(result["answer"])
+            print("\nSources:")
             for j, src in enumerate(result["sources"], 1):
-                print(f"  [{j}] {src['source']} ({src['year_range']}, page {src['page']})")
-            print(f"\nTiming: retrieval={result['retrieval_time_s']}s | generation={result['generation_time_s']}s")
+                print(f"  [{j}] doi:{src['doi']}  p.{src['page']}  dist={src['distance']}")
 
         except Exception as e:
             logger.error(f"Failed on question {i}: {e}")
             results.append({"question": question, "error": str(e)})
 
-    # Save results
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     output_data = {
         "model": args.model,
         "vector_db": args.vector_db,
+        "top_k": args.top_k,
+        "n_candidates": args.n_candidates,
         "total_questions": len(questions),
         "successful": sum(1 for r in results if "error" not in r),
+        "confidence_distribution": {
+            label: sum(1 for r in results if r.get("confidence") == label)
+            for label in ["SUPPORTED", "PARTIALLY_SUPPORTED", "INFERRED", "UNSUPPORTED"]
+        },
         "results": results,
     }
     with open(args.output, "w") as f:
         json.dump(output_data, f, indent=2)
 
     logger.info(f"\n✓ Results saved to {args.output}")
-    logger.info(f"Answered {output_data['successful']}/{len(questions)} questions successfully")
+    logger.info(f"Answered {output_data['successful']}/{len(questions)} questions")
+    logger.info(f"Confidence: {output_data['confidence_distribution']}")
     logger.info("=" * 70)
 
 

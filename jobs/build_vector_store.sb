@@ -24,11 +24,9 @@ echo ""
 # Clear any conflicting modules first
 module purge
 
-# Load conda
-module load Miniforge3/24.3.0-0
-
-# Activate conda environment
-source $(conda info --base)/etc/profile.d/conda.sh
+# Activate conda environment using hardcoded path (avoids module conflict with Python)
+CONDA_BASE="/mnt/scratch/kodumuru/conda"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate bean_llm
 
 # Print environment info

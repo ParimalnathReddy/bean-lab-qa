@@ -3,8 +3,11 @@
 PDF Processor for LLM-based Document QA System
 Processes agricultural research PDFs from the Bean Lab collection
 
-Author: MSU HPCC Bean Lab
-Purpose: Extract, chunk, and prepare PDF documents for vector database ingestion
+Improvements over v1:
+  - Section detection: tags chunks with abstract/intro/methods/results/discussion/conclusion
+  - Table preservation: keeps table rows with surrounding explanatory text
+  - Increased overlap: 128 tokens (was 50) for better cross-chunk context
+  - Section metadata stored in each chunk for section-aware retrieval
 """
 
 import os
@@ -36,6 +39,71 @@ except ImportError:
 from tqdm import tqdm
 
 
+# ── Section detection ─────────────────────────────────────────────────────────
+# Ordered list of (section_name, regex_pattern) tuples.
+# Patterns match common scientific paper section headers (case-insensitive).
+# Sections are detected per-page and propagated forward until a new section starts.
+
+SECTION_PATTERNS = [
+    ("abstract",      r"^\s*(abstract)\s*$"),
+    ("introduction",  r"^\s*(introduction|background)\s*$"),
+    ("methods",       r"^\s*(materials?\s+and\s+methods?|methods?|methodology|experimental)\s*$"),
+    ("results",       r"^\s*(results?(\s+and\s+discussion)?)\s*$"),
+    ("discussion",    r"^\s*(discussion)\s*$"),
+    ("conclusion",    r"^\s*(conclusions?|summary)\s*$"),
+    ("references",    r"^\s*(references?|bibliography|literature\s+cited)\s*$"),
+]
+
+# Compiled patterns for speed
+_COMPILED_SECTION_PATTERNS = [
+    (name, re.compile(pat, re.IGNORECASE | re.MULTILINE))
+    for name, pat in SECTION_PATTERNS
+]
+
+
+def detect_section(line: str) -> Optional[str]:
+    """Return section name if line matches a section header, else None."""
+    stripped = line.strip()
+    for name, pattern in _COMPILED_SECTION_PATTERNS:
+        if pattern.match(stripped):
+            return name
+    return None
+
+
+def is_table_row(line: str) -> bool:
+    """
+    Heuristic: a line is part of a table if it contains at least 2 tab-separated
+    or multiple-space-separated columns, or pipe characters, typical of PDF tables.
+    """
+    if "|" in line:
+        return True
+    # Two or more groups of 3+ spaces between tokens suggest tabular alignment
+    if re.search(r'\S\s{3,}\S', line) and len(line.strip()) > 10:
+        return True
+    return False
+
+
+def group_table_blocks(lines: List[str]) -> List[Dict]:
+    """
+    Scan lines and group consecutive table rows into blocks.
+    Returns list of dicts: {"type": "text"|"table", "content": str}
+    """
+    blocks = []
+    i = 0
+    while i < len(lines):
+        if is_table_row(lines[i]):
+            # Collect consecutive table rows
+            table_lines = []
+            while i < len(lines) and is_table_row(lines[i]):
+                table_lines.append(lines[i])
+                i += 1
+            blocks.append({"type": "table", "content": "\n".join(table_lines)})
+        else:
+            blocks.append({"type": "text", "content": lines[i]})
+            i += 1
+    return blocks
+
+
 class PDFProcessor:
     """
     Memory-efficient PDF processor for HPCC environment.
@@ -48,7 +116,7 @@ class PDFProcessor:
         output_file: str,
         log_file: str,
         chunk_size: int = 512,
-        chunk_overlap: int = 50,
+        chunk_overlap: int = 128,
         use_ocr: bool = False,
         encoding_model: str = "cl100k_base"  # GPT-3.5/4 tokenizer
     ):
@@ -60,7 +128,7 @@ class PDFProcessor:
             output_file: Path to output JSON file
             log_file: Path to log file
             chunk_size: Number of tokens per chunk
-            chunk_overlap: Number of overlapping tokens between chunks
+            chunk_overlap: Overlapping tokens between chunks (128 for good cross-chunk context)
             use_ocr: Whether to use OCR for scanned documents
             encoding_model: Tokenizer model name for tiktoken
         """
@@ -252,83 +320,119 @@ class PDFProcessor:
 
     def chunk_text(self, text: str, source_file: str, year_range: str) -> List[Dict]:
         """
-        Split text into overlapping chunks.
+        Split text into overlapping chunks with section detection and table preservation.
+
+        Changes from v1:
+          - Section headers detected per line; current section propagated to all chunks
+          - Table rows grouped and kept intact (not split mid-table)
+          - Table blocks always emitted as a single chunk even if > chunk_size
+          - Text chunks use 128-token overlap for cross-chunk context
 
         Args:
-            text: Full text to chunk
-            source_file: Source PDF filename
-            year_range: Year range metadata
+            text: Full text extracted from PDF (with [PAGE N] markers)
+            source_file: Source PDF filename for metadata
+            year_range: Year range metadata (e.g. "1961-2006")
 
         Returns:
-            List of chunk dictionaries with metadata
+            List of chunk dicts with keys: text, source_file, year_range,
+            chunk_id, page_number, token_count, section
         """
         chunks = []
 
-        # Split by page markers first to track page numbers
+        # Split by page markers to track page numbers
         page_sections = re.split(r'\[PAGE (\d+)\]', text)
 
         current_chunk = ""
         current_tokens = 0
         chunk_id = 0
         current_page = 1
+        current_section = ""          # tracks detected section name
+
+        def flush_chunk(section: str, page: int):
+            """Save current_chunk as a completed chunk."""
+            nonlocal current_chunk, current_tokens, chunk_id
+            if current_chunk.strip():
+                chunks.append({
+                    "text": current_chunk.strip(),
+                    "source_file": source_file,
+                    "year_range": year_range,
+                    "chunk_id": chunk_id,
+                    "page_number": page,
+                    "token_count": current_tokens,
+                    "section": section,
+                })
+                chunk_id += 1
 
         for i in range(1, len(page_sections), 2):
-            if i + 1 < len(page_sections):
-                page_num = int(page_sections[i])
-                page_text = page_sections[i + 1]
+            if i + 1 >= len(page_sections):
+                break
 
-                # Split page text into sentences for better chunking
-                sentences = re.split(r'(?<=[.!?])\s+', page_text)
+            page_num = int(page_sections[i])
+            page_text = page_sections[i + 1]
 
-                for sentence in sentences:
-                    sentence = sentence.strip()
-                    if not sentence:
-                        continue
+            # Split page into lines for section detection and table grouping
+            lines = page_text.split("\n")
+            blocks = group_table_blocks(lines)   # list of {type, content}
 
-                    sentence_tokens = self.count_tokens(sentence)
+            for block in blocks:
+                btype = block["type"]
+                content = block["content"].strip()
+                if not content:
+                    continue
 
-                    # Check if adding this sentence exceeds chunk size
-                    if current_tokens + sentence_tokens > self.chunk_size and current_chunk:
-                        # Save current chunk
-                        chunks.append({
-                            "text": current_chunk.strip(),
-                            "source_file": source_file,
-                            "year_range": year_range,
-                            "chunk_id": chunk_id,
-                            "page_number": current_page,
-                            "token_count": current_tokens
-                        })
-                        chunk_id += 1
+                if btype == "table":
+                    # ── Table block: flush current text chunk, emit table as its own chunk ──
+                    flush_chunk(current_section, page_num)
+                    current_chunk = ""
+                    current_tokens = 0
 
-                        # Start new chunk with overlap
-                        # Keep last portion of text for overlap
-                        if self.chunk_overlap > 0:
+                    table_tokens = self.count_tokens(content)
+                    chunks.append({
+                        "text": content,
+                        "source_file": source_file,
+                        "year_range": year_range,
+                        "chunk_id": chunk_id,
+                        "page_number": page_num,
+                        "token_count": table_tokens,
+                        "section": current_section,
+                    })
+                    chunk_id += 1
+
+                else:
+                    # ── Text block: check for section header on each line ──────────────────
+                    sentences = re.split(r'(?<=[.!?])\s+', content)
+
+                    for sentence in sentences:
+                        sentence = sentence.strip()
+                        if not sentence:
+                            continue
+
+                        # Check if this line is a section header
+                        detected = detect_section(sentence)
+                        if detected:
+                            # Flush before starting new section
+                            flush_chunk(current_section, page_num)
+                            current_chunk = ""
+                            current_tokens = 0
+                            current_section = detected
+                            continue   # don't add header text to chunk
+
+                        sentence_tokens = self.count_tokens(sentence)
+
+                        if current_tokens + sentence_tokens > self.chunk_size and current_chunk:
+                            # Flush and start new chunk with overlap
+                            flush_chunk(current_section, page_num)
                             overlap_text = self._get_overlap_text(current_chunk, self.chunk_overlap)
-                            current_chunk = overlap_text + " " + sentence
+                            current_chunk = (overlap_text + " " + sentence).strip()
                             current_tokens = self.count_tokens(current_chunk)
                         else:
-                            current_chunk = sentence
-                            current_tokens = sentence_tokens
-                    else:
-                        # Add sentence to current chunk
-                        if current_chunk:
-                            current_chunk += " " + sentence
-                        else:
-                            current_chunk = sentence
-                        current_tokens += sentence_tokens
+                            current_chunk = (current_chunk + " " + sentence).strip() if current_chunk else sentence
+                            current_tokens += sentence_tokens
 
-                    current_page = page_num
+                current_page = page_num
 
-        # Add final chunk if exists
-        if current_chunk.strip():
-            chunks.append({
-                "text": current_chunk.strip(),
-                "source_file": source_file,
-                "year_range": year_range,
-                "chunk_id": chunk_id,
-                "page_number": current_page,
-                "token_count": current_tokens
-            })
+        # Flush any remaining text
+        flush_chunk(current_section, current_page)
 
         self.stats["total_chunks"] += len(chunks)
         return chunks
@@ -565,7 +669,7 @@ def main():
     parser.add_argument(
         "--chunk-overlap",
         type=int,
-        default=50,
+        default=128,
         help="Overlap between chunks in tokens"
     )
     parser.add_argument(

@@ -39,10 +39,10 @@ mkdir -p logs
 # Clear conflicting modules and load required ones
 module purge
 module load Ollama/0.15.5
-module load Miniforge3/24.3.0-0
 
-# Activate conda environment
-source $(conda info --base)/etc/profile.d/conda.sh
+# Activate conda environment using hardcoded path (avoids module conflict with Python)
+CONDA_BASE="/mnt/scratch/kodumuru/conda"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate bean_llm
 
 echo "Python version:"
