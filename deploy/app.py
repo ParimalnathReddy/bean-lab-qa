@@ -100,6 +100,21 @@ def call_llm(messages: list) -> str:
 
 # ── Main QA function ──────────────────────────────────────────────────────────
 
+# Distance above this means the corpus has nothing relevant — skip LLM entirely.
+# With L2-normalized embeddings: dist=1.1 ≈ cosine similarity 0.40 (very weak).
+NO_MATCH_THRESHOLD = 1.10
+
+_OUT_OF_SCOPE_MSG = (
+    "This system only answers questions about bean and legume crop science.\n\n"
+    "No relevant research was found for your input. Try asking about:\n"
+    "• Bean diseases and management (rust, white mold, BCMV, bacterial blight)\n"
+    "• Drought or heat stress effects on bean yield\n"
+    "• Nitrogen fixation rates in common bean\n"
+    "• Breeding for disease resistance or yield improvement\n"
+    "• Intercropping, soil nutrition, or agronomic management"
+)
+
+
 def answer_question(question: str, year_filter: str) -> tuple:
     if _startup_error:
         return f"System error: {_startup_error}", ""
@@ -117,6 +132,10 @@ def answer_question(question: str, year_filter: str) -> tuple:
         year_range=year_range,
         n_candidates=N_CANDIDATES,
     )
+
+    # If the best chunk is too distant, the question is out of scope — don't waste LLM call
+    if not chunks or chunks[0].get("distance", 99) > NO_MATCH_THRESHOLD:
+        return _OUT_OF_SCOPE_MSG, ""
 
     # Build evidence-first prompt
     messages = build_messages(question, chunks, confidence)
