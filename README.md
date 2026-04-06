@@ -1,5 +1,7 @@
 # HPCC LLM-Based Document QA System
 
+**🟢 LIVE DEMO (Production QA System):** [https://huggingface.co/spaces/Parimalanath/bean-lab-qa](https://huggingface.co/spaces/Parimalanath/bean-lab-qa)
+
 ## 📚 Complete Documentation Index
 
 Welcome to the Bean Lab PDF Processing System for MSU HPCC. This README serves as your central navigation hub for all documentation.
