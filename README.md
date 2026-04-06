@@ -1,16 +1,16 @@
 # HPCC LLM-Based Document QA System
 
-**🟢 LIVE DEMO (Production QA System):** [https://huggingface.co/spaces/Parimalanath/bean-lab-qa](https://huggingface.co/spaces/Parimalanath/bean-lab-qa)
+** LIVE DEMO (Production QA System):** [https://huggingface.co/spaces/Parimalanath/bean-lab-qa](https://huggingface.co/spaces/Parimalanath/bean-lab-qa)
 
-## 📚 Complete Documentation Index
+## Complete Documentation Index
 
 Welcome to the Bean Lab PDF Processing System for MSU HPCC. This README serves as your central navigation hub for all documentation.
 
 ---
 
-## 🚀 Quick Navigation
+## Quick Navigation
 
-### **New Users Start Here** ⭐
+### **New Users Start Here** 
 1. Read [QUICK_START.md](QUICK_START.md) - Get running in 5 minutes
 2. Run `bash scripts/setup_pdf_processing.sh` - Automated setup
 3. Test with `python3 src/test_processor.py` - Verify installation
@@ -32,7 +32,7 @@ Welcome to the Bean Lab PDF Processing System for MSU HPCC. This README serves a
 
 ---
 
-## 📖 Documentation Map
+## Documentation Map
 
 ### Core Documentation
 
@@ -73,7 +73,7 @@ Welcome to the Bean Lab PDF Processing System for MSU HPCC. This README serves a
 
 ---
 
-## 📊 Project Overview
+## Project Overview
 
 ### Dataset
 
@@ -98,7 +98,7 @@ Welcome to the Bean Lab PDF Processing System for MSU HPCC. This README serves a
 
 ---
 
-## 🎯 Common Tasks
+## Common Tasks
 
 ### Installation
 
@@ -162,19 +162,19 @@ python3 -c "import json; import pprint; pprint.pprint(json.load(open('data/proce
 
 ---
 
-## 🔧 Configuration Options
+## Configuration Options
 
 ### Command-Line Arguments
 
 ```bash
 python3 src/pdf_processor.py \
-    --input-dir data/pdfs \              # PDF directory
-    --output-file data/output.json \     # Output file
-    --log-file logs/processing.log \     # Log file
-    --chunk-size 512 \                   # Tokens per chunk
-    --chunk-overlap 50 \                 # Overlap tokens
-    --use-ocr \                          # Enable OCR
-    --batch-size 50                      # Checkpoint frequency
+  --input-dir data/pdfs \       # PDF directory
+  --output-file data/output.json \   # Output file
+  --log-file logs/processing.log \   # Log file
+  --chunk-size 512 \          # Tokens per chunk
+  --chunk-overlap 50 \         # Overlap tokens
+  --use-ocr \             # Enable OCR
+  --batch-size 50           # Checkpoint frequency
 ```
 
 ### Environment Variables
@@ -188,50 +188,50 @@ export SENTENCE_TRANSFORMERS_HOME=/mnt/scratch/$USER/llm_cache/sentence_transfor
 
 ---
 
-## 📁 Directory Structure
+## Directory Structure
 
 ```
 hpcc-llm-qa/
-├── README.md                         # This file - START HERE
-├── QUICK_START.md                    # 5-minute quick start
-├── README_PDF_PROCESSOR.md           # Complete user guide
-├── CODE_DOCUMENTATION.md             # Code architecture
-├── PDF_ANALYSIS.md                   # Dataset analysis
+├── README.md             # This file - START HERE
+├── QUICK_START.md          # 5-minute quick start
+├── README_PDF_PROCESSOR.md      # Complete user guide
+├── CODE_DOCUMENTATION.md       # Code architecture
+├── PDF_ANALYSIS.md          # Dataset analysis
 │
 ├── src/
-│   ├── pdf_processor.py              # Main processor
-│   ├── pdf_processor_commented.py    # Fully commented version
-│   └── test_processor.py             # Test suite
+│  ├── pdf_processor.py       # Main processor
+│  ├── pdf_processor_commented.py  # Fully commented version
+│  └── test_processor.py       # Test suite
 │
 ├── data/
-│   ├── pdfs/                         # Input PDFs (symlinks)
-│   │   ├── 1961-2006/  (964 PDFs)
-│   │   └── 2007-2026/  (103 PDFs)
-│   ├── processed_chunks.json         # Output chunks
-│   ├── processing_metadata.json      # Statistics
-│   └── checkpoint_*.json             # Intermediate saves
+│  ├── pdfs/             # Input PDFs (symlinks)
+│  │  ├── 1961-2006/ (964 PDFs)
+│  │  └── 2007-2026/ (103 PDFs)
+│  ├── processed_chunks.json     # Output chunks
+│  ├── processing_metadata.json   # Statistics
+│  └── checkpoint_*.json       # Intermediate saves
 │
 ├── jobs/
-│   └── process_pdfs.sb               # SLURM job script
+│  └── process_pdfs.sb        # SLURM job script
 │
 ├── logs/
-│   ├── processing.log                # Main log
-│   └── pdf_processing_*.{out,err}    # SLURM logs
+│  ├── processing.log        # Main log
+│  └── pdf_processing_*.{out,err}  # SLURM logs
 │
 ├── scripts/
-│   ├── setup_pdf_processing.sh       # Setup automation
-│   └── analyze_and_copy_pdfs.sh      # PDF organization
+│  ├── setup_pdf_processing.sh    # Setup automation
+│  └── analyze_and_copy_pdfs.sh   # PDF organization
 │
 ├── config/
-│   ├── HPCC_SETUP_GUIDE.md          # HPCC documentation
-│   └── module_setup.sh               # Module loading
+│  ├── HPCC_SETUP_GUIDE.md     # HPCC documentation
+│  └── module_setup.sh        # Module loading
 │
-└── requirements.txt                  # Python dependencies
+└── requirements.txt         # Python dependencies
 ```
 
 ---
 
-## 📝 Output Format
+## Output Format
 
 ### Chunk Structure
 
@@ -239,12 +239,12 @@ Each chunk is a JSON object with:
 
 ```json
 {
-  "text": "Bean breeding programs have demonstrated...",
-  "source_file": "10.2135_cropsci1969.0011183X000900030028x.pdf",
-  "year_range": "1961-2006",
-  "chunk_id": 0,
-  "page_number": 1,
-  "token_count": 487
+ "text": "Bean breeding programs have demonstrated...",
+ "source_file": "10.2135_cropsci1969.0011183X000900030028x.pdf",
+ "year_range": "1961-2006",
+ "chunk_id": 0,
+ "page_number": 1,
+ "token_count": 487
 }
 ```
 
@@ -252,35 +252,35 @@ Each chunk is a JSON object with:
 
 ```json
 {
-  "processing_date": "2026-03-21T14:30:00.123456",
-  "statistics": {
-    "total_pdfs": 1067,
-    "successful": 1067,
-    "failed": 0,
-    "total_chunks": 15234,
-    "total_pages": 8456,
-    "ocr_used": 0
-  },
-  "configuration": {
-    "chunk_size": 512,
-    "chunk_overlap": 50,
-    "use_ocr": false
-  },
-  "total_chunks": 15234
+ "processing_date": "2026-03-21T14:30:00.123456",
+ "statistics": {
+  "total_pdfs": 1067,
+  "successful": 1067,
+  "failed": 0,
+  "total_chunks": 15234,
+  "total_pages": 8456,
+  "ocr_used": 0
+ },
+ "configuration": {
+  "chunk_size": 512,
+  "chunk_overlap": 50,
+  "use_ocr": false
+ },
+ "total_chunks": 15234
 }
 ```
 
 ---
 
-## 🖥️ HPCC Best Practices
+## HPCC Best Practices
 
 ### 1. **Always Use SLURM for Processing**
 ```bash
 # DON'T run on login node:
-# python3 src/pdf_processor.py  ❌
+# python3 src/pdf_processor.py 
 
 # DO submit as job:
-sbatch jobs/process_pdfs.sb  ✅
+sbatch jobs/process_pdfs.sb 
 ```
 
 ### 2. **Set Cache Directories to Scratch**
@@ -296,8 +296,8 @@ ln -s /source/path data/pdfs/directory
 
 ### 4. **Monitor Disk Quota**
 ```bash
-quota -s  # Check home directory
-du -sh /mnt/research/BeanLab/Parimal  # Check research storage
+quota -s # Check home directory
+du -sh /mnt/research/BeanLab/Parimal # Check research storage
 ```
 
 ### 5. **Load Modules or Use Conda**
@@ -311,7 +311,7 @@ module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 
 ---
 
-## 🔍 Function Reference
+## Function Reference
 
 ### Main Functions
 
@@ -331,7 +331,7 @@ See [CODE_DOCUMENTATION.md](CODE_DOCUMENTATION.md) for detailed API reference.
 
 ---
 
-## ⚡ Performance
+## Performance
 
 ### Expected Processing Times
 
@@ -351,7 +351,7 @@ See [CODE_DOCUMENTATION.md](CODE_DOCUMENTATION.md) for detailed API reference.
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -381,7 +381,7 @@ tail -f logs/processing.log
 
 ---
 
-## 📚 Additional Resources
+## Additional Resources
 
 ### External Documentation
 
@@ -399,7 +399,7 @@ tail -f logs/processing.log
 
 ---
 
-## 🎓 Learning Path
+## Learning Path
 
 ### For Complete Beginners
 
@@ -427,7 +427,7 @@ tail -f logs/processing.log
 
 ---
 
-## 🚦 Next Steps
+## Next Steps
 
 After PDF processing completes:
 
@@ -446,9 +446,9 @@ import chromadb
 client = chromadb.Client()
 collection = client.create_collection("bean_research")
 collection.add(
-    documents=[chunk['text'] for chunk in chunks],
-    metadatas=[{k:v for k,v in chunk.items() if k != 'text'} for chunk in chunks],
-    ids=[f"chunk_{i}" for i in range(len(chunks))]
+  documents=[chunk['text'] for chunk in chunks],
+  metadatas=[{k:v for k,v in chunk.items() if k != 'text'} for chunk in chunks],
+  ids=[f"chunk_{i}" for i in range(len(chunks))]
 )
 ```
 
@@ -458,8 +458,8 @@ from langchain.chains import RetrievalQA
 from langchain.llms import OpenAI
 
 qa_chain = RetrievalQA.from_chain_type(
-    llm=OpenAI(),
-    retriever=vectorstore.as_retriever()
+  llm=OpenAI(),
+  retriever=vectorstore.as_retriever()
 )
 
 answer = qa_chain.run("What are the main bean breeding techniques?")
@@ -467,7 +467,7 @@ answer = qa_chain.run("What are the main bean breeding techniques?")
 
 ---
 
-## 📞 Support
+## Support
 
 ### Getting Help
 
@@ -486,7 +486,7 @@ Include:
 
 ---
 
-## 📜 Project Information
+## Project Information
 
 - **Project**: HPCC LLM Document QA System
 - **Lab**: MSU Bean Lab
@@ -497,7 +497,7 @@ Include:
 
 ---
 
-## ✅ Checklist
+## Checklist
 
 ### Setup Checklist
 - [ ] Read QUICK_START.md
@@ -522,4 +522,4 @@ Include:
 
 ---
 
-**🚀 Ready to start? → [QUICK_START.md](QUICK_START.md)**
+** Ready to start? → [QUICK_START.md](QUICK_START.md)**
