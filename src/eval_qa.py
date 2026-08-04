@@ -2,12 +2,18 @@
 """
 Evaluation benchmark for the Bean Lab RAG QA system.
 
-Covers 5 question categories, 5 questions each (25 total):
+Coarse keyword-rubric scoring — see eval_ragas.py for LLM-judged RAGAS
+metrics (faithfulness, answer relevancy, context precision, context recall),
+which are far less foolable than keyword matching. Both scripts import the
+same 75-question set from benchmark_questions.py, across 7 categories:
   1. Direct lookup      — fact is stated verbatim in a single paper
   2. Cross-section      — fact must be assembled from multiple papers/sections
   3. Inference          — answer follows logically but is not stated directly
   4. Critique           — asks for limitations, gaps, or criticisms
   5. Multi-part         — compound questions requiring multiple sub-answers
+  6. Adversarial        — fake genes/cultivars/out-of-scope topics; probes
+                          hallucination rather than fact recall
+  7. Multi-hop          — requires synthesizing across 3+ papers/sub-topics
 
 Usage (on HPCC with Ollama running):
     python eval_qa.py \\
@@ -23,6 +29,7 @@ Optional flags:
 """
 
 import os
+import re
 import sys
 import json
 import logging
@@ -42,301 +49,23 @@ from qa_with_ollama import (
     check_ollama_server,
     answer_question,
 )
-
-
-# ── Benchmark questions ────────────────────────────────────────────────────────
-# Each entry: {id, category, question, rubric}
-# rubric: list of expected answer elements used for manual or automated scoring.
-
-BENCHMARK = [
-
-    # ── 1. Direct lookup ──────────────────────────────────────────────────────
-    {
-        "id": "DL-01",
-        "category": "direct_lookup",
-        "question": "What nitrogen fixation rates have been reported for common bean (Phaseolus vulgaris) varieties?",
-        "rubric": [
-            "specific numerical fixation rates (kg N/ha or % N derived from atmosphere)",
-            "mention of Rhizobium or nodulation",
-            "at least one cultivar or experimental condition",
-        ],
-    },
-    {
-        "id": "DL-02",
-        "category": "direct_lookup",
-        "question": "What soil pH range is considered optimal for common bean production?",
-        "rubric": [
-            "pH range (typically 6.0–7.0)",
-            "reference to nutrient availability or root health",
-        ],
-    },
-    {
-        "id": "DL-03",
-        "category": "direct_lookup",
-        "question": "What are the symptoms of bean rust caused by Uromyces appendiculatus?",
-        "rubric": [
-            "description of pustules or uredinia",
-            "leaf or stem symptoms",
-            "mention of sporulation or color",
-        ],
-    },
-    {
-        "id": "DL-04",
-        "category": "direct_lookup",
-        "question": "What seed yield advantage has been reported for indeterminate over determinate bean varieties under field conditions?",
-        "rubric": [
-            "numerical yield comparison (% or kg/ha)",
-            "mention of growth habit type (Type I, II, III, IV)",
-            "at least one study or environment cited",
-        ],
-    },
-    {
-        "id": "DL-05",
-        "category": "direct_lookup",
-        "question": "What herbicides are commonly used for weed control in dry bean production?",
-        "rubric": [
-            "at least two herbicide names (e.g., S-metolachlor, imazethapyr, fomesafen)",
-            "mention of application timing or target weed species",
-        ],
-    },
-
-    # ── 2. Cross-section synthesis ────────────────────────────────────────────
-    {
-        "id": "CS-01",
-        "category": "cross_section",
-        "question": "How has marker-assisted selection improved bean resistance to bean common mosaic virus (BCMV)?",
-        "rubric": [
-            "identifies specific resistance genes or QTLs (e.g., I gene, bc-1, bc-3)",
-            "describes how MAS is applied in breeding",
-            "mentions genetic diversity or gene pools",
-        ],
-    },
-    {
-        "id": "CS-02",
-        "category": "cross_section",
-        "question": "How does intercropping common bean with maize affect bean yield and nitrogen fixation?",
-        "rubric": [
-            "yield comparison (monoculture vs. intercrop)",
-            "light or nutrient competition effects",
-            "nitrogen fixation change (increase or decrease with rationale)",
-        ],
-    },
-    {
-        "id": "CS-03",
-        "category": "cross_section",
-        "question": "What is the role of phosphorus availability in nitrogen fixation efficiency in common bean?",
-        "rubric": [
-            "mechanism linking P to nodulation or nitrogenase activity",
-            "threshold P level or fertilization trial results",
-            "interaction with soil pH or organic matter",
-        ],
-    },
-    {
-        "id": "CS-04",
-        "category": "cross_section",
-        "question": "How do drought stress and heat stress interact to affect bean pod set and seed filling?",
-        "rubric": [
-            "separate effects of drought and heat on reproductive stage",
-            "combined/interaction effects if reported",
-            "mention of canopy temperature or water deficit measurement",
-        ],
-    },
-    {
-        "id": "CS-05",
-        "category": "cross_section",
-        "question": "How have bean yield improvements been achieved through genetic improvement vs. agronomic management since 1990?",
-        "rubric": [
-            "distinguishes genetic gain from management-based yield increases",
-            "references breeding programs or variety releases",
-            "references agronomic practices (fertilization, planting density, irrigation)",
-        ],
-    },
-
-    # ── 3. Inference / cause-effect ───────────────────────────────────────────
-    {
-        "id": "IN-01",
-        "category": "inference",
-        "question": "Why is pyramiding rust resistance genes from both Middle American and Andean gene pools considered important for bean breeding programs?",
-        "rubric": [
-            "explanation of gene pool diversity (Middle American vs. Andean)",
-            "reason for combining genes (broader spectrum resistance or durability)",
-            "mention of Uromyces races or pathogen variation",
-        ],
-    },
-    {
-        "id": "IN-02",
-        "category": "inference",
-        "question": "Why might tepary bean (Phaseolus acutifolius) be more drought-tolerant than common bean at the physiological level?",
-        "rubric": [
-            "physiological mechanisms (deeper roots, reduced transpiration, osmotic adjustment)",
-            "comparison with common bean",
-            "at least one study or trait measurement cited",
-        ],
-    },
-    {
-        "id": "IN-03",
-        "category": "inference",
-        "question": "What explains why biological nitrogen fixation in common bean is often insufficient to meet crop nitrogen demand?",
-        "rubric": [
-            "factors limiting BNF (carbon cost, soil mineral N, P deficiency)",
-            "quantitative shortfall mentioned (kg N/ha fixed vs. required)",
-            "interaction with Rhizobium strain or soil conditions",
-        ],
-    },
-    {
-        "id": "IN-04",
-        "category": "inference",
-        "question": "Why does early-season drought have a more severe effect on bean yield than late-season drought?",
-        "rubric": [
-            "impact on flowering or pod set (vs. seed filling)",
-            "critical period concept",
-            "supporting data or study result",
-        ],
-    },
-    {
-        "id": "IN-05",
-        "category": "inference",
-        "question": "Why might low-input farming systems in sub-Saharan Africa benefit more from improved bean varieties than high-input systems?",
-        "rubric": [
-            "yield gap argument (genetic potential vs. realized yield)",
-            "role of disease resistance or adaptation in low-input contexts",
-            "comparison of input-response between systems",
-        ],
-    },
-
-    # ── 4. Critique / limitations ─────────────────────────────────────────────
-    {
-        "id": "CR-01",
-        "category": "critique",
-        "question": "What are the known challenges in breeding white mold (Sclerotinia sclerotiorum) resistance in dry beans?",
-        "rubric": [
-            "complexity of host-pathogen interaction",
-            "environmental variation in disease expression",
-            "lack of complete resistance in germplasm",
-            "difficulty of field screening",
-        ],
-    },
-    {
-        "id": "CR-02",
-        "category": "critique",
-        "question": "What methodological limitations affect the measurement of nitrogen fixation in field bean experiments?",
-        "rubric": [
-            "15N isotope dilution or acetylene reduction assay limitations",
-            "spatial or temporal variability in field trials",
-            "reference plant selection issues",
-        ],
-    },
-    {
-        "id": "CR-03",
-        "category": "critique",
-        "question": "What gaps remain in understanding the genetic basis of drought tolerance in common bean?",
-        "rubric": [
-            "complexity of quantitative inheritance",
-            "environment-by-genotype interaction",
-            "limited marker-trait associations or QTL stability",
-        ],
-    },
-    {
-        "id": "CR-04",
-        "category": "critique",
-        "question": "What are the limitations of using yield trials as the primary method for evaluating drought tolerance in bean breeding programs?",
-        "rubric": [
-            "confounding factors in field yield trials",
-            "inconsistency of drought timing across environments",
-            "need for physiological or secondary traits",
-        ],
-    },
-    {
-        "id": "CR-05",
-        "category": "critique",
-        "question": "What are the barriers to adopting improved bean varieties among smallholder farmers in developing countries?",
-        "rubric": [
-            "seed system or seed access issues",
-            "market or cultural preference factors",
-            "input cost or risk aversion",
-        ],
-    },
-
-    # ── 5. Multi-part questions ───────────────────────────────────────────────
-    {
-        "id": "MP-01",
-        "category": "multi_part",
-        "question": (
-            "What are the most effective fungicides for bean rust management, "
-            "how do they work mechanistically, and what resistance risks do they pose?"
-        ),
-        "rubric": [
-            "names at least two effective fungicide classes or active ingredients",
-            "explains mode of action (sterol inhibition, respiration, etc.)",
-            "addresses fungicide resistance risk or resistance management",
-        ],
-    },
-    {
-        "id": "MP-02",
-        "category": "multi_part",
-        "question": (
-            "Compare the drought tolerance mechanisms of tepary bean and common bean, "
-            "and explain the implications for introgression breeding programs."
-        ),
-        "rubric": [
-            "mechanism comparison (tepary vs. common bean physiology)",
-            "crossability barriers or reproductive isolation issues",
-            "practical implications for breeding (backcrossing, marker selection)",
-        ],
-    },
-    {
-        "id": "MP-03",
-        "category": "multi_part",
-        "question": (
-            "What soil amendments and inoculants have been used to enhance nitrogen fixation "
-            "in common bean, what are their effects on yield, and what factors limit their adoption?"
-        ),
-        "rubric": [
-            "specific amendments or inoculants (Rhizobium, P fertilizer, organic matter)",
-            "yield or fixation response data",
-            "adoption barriers (cost, availability, farmer knowledge)",
-        ],
-    },
-    {
-        "id": "MP-04",
-        "category": "multi_part",
-        "question": (
-            "How does common bacterial blight (CBB) spread in bean fields, "
-            "what resistance mechanisms have been identified, "
-            "and which breeding strategies are most effective for durable resistance?"
-        ),
-        "rubric": [
-            "describes disease spread pathway (seed, rain splash, insects)",
-            "identifies resistance QTLs or genes in Middle American or Andean germplasm",
-            "discusses durability strategy (pyramiding, multilines, rotation)",
-        ],
-    },
-    {
-        "id": "MP-05",
-        "category": "multi_part",
-        "question": (
-            "What are the nutritional benefits of common beans for human health, "
-            "what processing methods improve their bioavailability, "
-            "and what genetic variation exists for key nutritional traits?"
-        ),
-        "rubric": [
-            "nutritional content (protein, iron, zinc, fiber, polyphenols)",
-            "processing effects (soaking, cooking, fermentation) on anti-nutrients",
-            "genetic variability in bean accessions for nutritional traits",
-        ],
-    },
-]
+from benchmark_questions import BENCHMARK
 
 
 # ── Scoring helpers ────────────────────────────────────────────────────────────
 
-def score_answer(answer: str, rubric: List[str], confidence: str) -> Dict:
+def score_answer(answer: str, rubric: List[str], confidence: str,
+                  expect_low_confidence: bool = False) -> Dict:
     """
     Lightweight automated scoring:
       - rubric_coverage: fraction of rubric items found as keywords in answer
       - has_doi_citation: answer contains a doi: reference
       - has_confidence_label: answer contains a bracketed confidence label
       - confidence: retrieval confidence from BeanRetriever
+      - confidence_appropriate: for adversarial questions (expect_low_confidence=True),
+        whether the system actually hedged (INFERRED/UNSUPPORTED) rather than
+        confidently answering about a fabricated gene/cultivar/out-of-scope topic.
+        None for non-adversarial questions, where this check doesn't apply.
     """
     answer_lower = answer.lower()
 
@@ -354,11 +83,16 @@ def score_answer(answer: str, rubric: List[str], confidence: str) -> Dict:
     has_conf = bool(re.search(r'\[(supported|partially_supported|inferred|unsupported)\]',
                                answer_lower))
 
+    confidence_appropriate = None
+    if expect_low_confidence:
+        confidence_appropriate = confidence in ("INFERRED", "UNSUPPORTED")
+
     return {
         "rubric_coverage": coverage,
         "has_doi_citation": has_doi,
         "has_confidence_label": has_conf,
         "retrieval_confidence": confidence,
+        "confidence_appropriate": confidence_appropriate,
     }
 
 
@@ -427,6 +161,7 @@ def main():
                 result["answer"],
                 item["rubric"],
                 result["confidence"],
+                expect_low_confidence=item.get("expect_low_confidence", False),
             )
 
             entry = {
@@ -473,6 +208,15 @@ def main():
     cat_avg = {cat: round(sum(scores) / len(scores), 3)
                for cat, scores in category_scores.items()}
 
+    adversarial_checked = [
+        r["scores"]["confidence_appropriate"] for r in successful
+        if r["scores"].get("confidence_appropriate") is not None
+    ]
+    adversarial_hedge_rate = (
+        round(sum(adversarial_checked) / len(adversarial_checked), 3)
+        if adversarial_checked else None
+    )
+
     output = {
         "model": args.model,
         "vector_db": args.vector_db,
@@ -484,6 +228,7 @@ def main():
             "avg_rubric_coverage": avg_coverage,
             "doi_citation_rate": doi_rate,
             "confidence_label_rate": conf_rate,
+            "adversarial_appropriate_hedge_rate": adversarial_hedge_rate,
         },
         "by_category": cat_avg,
         "confidence_distribution": conf_dist,
@@ -499,6 +244,9 @@ def main():
     logger.info(f"Avg rubric coverage:    {avg_coverage:.1%}")
     logger.info(f"DOI citation rate:      {doi_rate:.1%}")
     logger.info(f"Confidence label rate:  {conf_rate:.1%}")
+    if adversarial_hedge_rate is not None:
+        logger.info(f"Adversarial hedge rate: {adversarial_hedge_rate:.1%} "
+                     f"(of {len(adversarial_checked)} adversarial questions)")
     logger.info(f"By category: {cat_avg}")
     logger.info(f"Confidence distribution: {conf_dist}")
     logger.info(f"Results → {args.output}")
@@ -510,6 +258,9 @@ def main():
     print(f"  Avg rubric coverage:  {avg_coverage:.1%}")
     print(f"  DOI citation rate:    {doi_rate:.1%}")
     print(f"  Confidence labels:    {conf_rate:.1%}")
+    if adversarial_hedge_rate is not None:
+        print(f"  Adversarial hedge rate: {adversarial_hedge_rate:.1%} "
+              f"(of {len(adversarial_checked)} adversarial questions)")
     print(f"\n  By category:")
     for cat, score in cat_avg.items():
         print(f"    {cat:<25} {score:.1%}")

@@ -1,0 +1,93 @@
+#!/bin/bash
+#SBATCH --job-name=build_gene_index
+#SBATCH --time=01:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8GB
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/gene_index_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/gene_index_%j.err
+
+################################################################################
+# SLURM Job Script for Gene Index Building (Change 5)
+#
+# Downloads NCBI gene_info.gz (~1.5GB, filtered to Phaseolus vulgaris /
+# taxid 3885) and UniProt's P. vulgaris subset, builds gene_id_map +
+# symbol_map, pickles to vector_db/gene_index.pkl (~8MB — verified size
+# from an actual run, not an estimate).
+#
+# No GPU needed — this is a lightweight network + streaming-parse job.
+#
+# NETWORK NOTE: this job needs outbound HTTPS to ftp.ncbi.nlm.nih.gov and
+# rest.uniprot.org. If your HPCC compute nodes block outbound network access
+# (check with your cluster docs, or just try this job and see if the
+# download step fails), download gene_info.gz on a login node first:
+#
+#   ssh <login-node>
+#   cd /mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa
+#   wget https://ftp.ncbi.nlm.nih.gov/gene/DATA/gene_info.gz -O data/gene_info.gz
+#
+# then edit the python3 command below to add:
+#   --gene-info-path "${PROJECT_DIR}/data/gene_info.gz"
+# (UniProt's REST call still needs network from wherever this job runs.)
+################################################################################
+
+echo "========================================"
+echo "Gene Index Building Job"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "Start time: $(date)"
+echo "========================================"
+echo ""
+
+PROJECT_DIR="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "$PROJECT_DIR"
+
+mkdir -p logs data vector_db
+
+# Clear conflicting modules
+module purge
+
+# Activate conda environment using hardcoded path (avoids module conflict with Python)
+CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate /mnt/scratch/kodumuru/conda/envs/bean_llm
+
+echo "Python version:"
+python3 --version
+echo ""
+
+export PYTHONUNBUFFERED=1
+
+# Quick reachability check before committing to the ~1.5GB download
+echo "Checking network access to NCBI..."
+if ! curl -sI --max-time 15 "https://ftp.ncbi.nlm.nih.gov/gene/DATA/gene_info.gz" | grep -q "200"; then
+    echo "WARNING: Could not reach ftp.ncbi.nlm.nih.gov from this node."
+    echo "See the network note at the top of this script — you may need to"
+    echo "download gene_info.gz on a login node instead."
+fi
+echo ""
+
+echo "Building gene index..."
+echo ""
+
+python3 src/build_gene_index.py \
+    --output "${PROJECT_DIR}/vector_db/gene_index.pkl" \
+    --log-file "${PROJECT_DIR}/logs/gene_index_${SLURM_JOB_ID}.log"
+
+EXIT_CODE=$?
+
+echo ""
+echo "========================================"
+echo "Job Complete!"
+echo "Exit code: $EXIT_CODE"
+echo "End time: $(date)"
+echo "========================================"
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "Output:"
+    ls -lh "${PROJECT_DIR}/vector_db/gene_index.pkl" 2>/dev/null || echo "gene_index.pkl not found"
+fi
+
+exit $EXIT_CODE

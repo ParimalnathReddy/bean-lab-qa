@@ -16,12 +16,16 @@ Output:
     - data/embeddings_metadata.json (metadata and validation info)
 
 Model:
-    - all-MiniLM-L6-v2 (384-dimensional embeddings)
-    - Optimized for semantic similarity
-    - Fast and efficient
+    - BAAI/bge-large-en-v1.5 (1024-dimensional embeddings, 335M params)
+    - 64.2% MTEB retrieval score vs 56.3% for all-MiniLM-L6-v2
+    - Query-side text must be prefixed with the BGE retrieval instruction
+      ("Represent this sentence for searching relevant passages: ") — this
+      is handled at query time in retriever.py, NOT here. Passages/documents
+      (this script) are embedded WITHOUT the instruction prefix, per the
+      BGE model card.
 
 GPU Optimization:
-    - Batch processing (batch_size=32)
+    - Batch processing (batch_size=16, reduced from 32 for the larger model)
     - CUDA acceleration on V100
     - Mixed precision support
     - Memory-efficient batching
@@ -78,8 +82,8 @@ class EmbeddingGenerator:
         output_embeddings: str,                   # Path to save embeddings.npy
         output_metadata: str,                     # Path to save metadata.json
         log_file: str,                            # Path to log file
-        model_name: str = "all-MiniLM-L6-v2",    # Sentence transformer model
-        batch_size: int = 32,                     # Batch size for GPU
+        model_name: str = "BAAI/bge-large-en-v1.5",  # Sentence transformer model
+        batch_size: int = 16,                     # Batch size for GPU
         device: str = None                        # Device (auto-detect if None)
     ):
         """
@@ -223,9 +227,10 @@ class EmbeddingGenerator:
         Load sentence-transformers model.
 
         Model Details:
-            - all-MiniLM-L6-v2: 384-dimensional embeddings
-            - Fast and efficient
-            - Good for semantic similarity
+            - BAAI/bge-large-en-v1.5: 1024-dimensional embeddings
+            - Documents are embedded WITHOUT any instruction prefix
+              (only queries get the retrieval instruction, applied in
+              retriever.py at query time)
         """
 
         self.logger.info("Loading sentence-transformers model...")
@@ -707,14 +712,14 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="all-MiniLM-L6-v2",
+        default="BAAI/bge-large-en-v1.5",
         help="Sentence-transformers model name"
     )
 
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=32,
+        default=16,
         help="Batch size for GPU processing"
     )
 

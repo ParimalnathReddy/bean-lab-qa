@@ -29,7 +29,7 @@ from prompts import build_messages, format_references
 # ── Config ────────────────────────────────────────────────────────────────────
 
 COLLECTION_NAME = "bean_research_docs"
-EMBED_MODEL     = "sentence-transformers/all-MiniLM-L6-v2"
+EMBED_MODEL     = "BAAI/bge-large-en-v1.5"
 LLM_MODEL       = "Qwen/Qwen2.5-7B-Instruct"
 DB_PATH         = "vector_db"
 TOP_K           = 10
@@ -123,6 +123,19 @@ _OUT_OF_SCOPE_MSG = (
 )
 
 
+def _out_of_scope(chunks) -> bool:
+    """
+    True if there's no chunk, or the top chunk's dense distance exceeds the
+    out-of-scope threshold. BM25-only top chunks (hybrid retrieval,
+    distance=None) never trigger this — see the identical helper in
+    hf_space/app.py for the full rationale.
+    """
+    if not chunks:
+        return True
+    dist = chunks[0].get("distance")
+    return dist is not None and dist > NO_MATCH_THRESHOLD
+
+
 def answer_question(question: str, year_filter: str) -> tuple:
     if _startup_error:
         return f"System error: {_startup_error}", ""
@@ -147,7 +160,7 @@ def answer_question(question: str, year_filter: str) -> tuple:
     )
 
     # If the best chunk is too distant, the question is out of scope — don't waste LLM call
-    if not chunks or chunks[0].get("distance", 99) > NO_MATCH_THRESHOLD:
+    if _out_of_scope(chunks):
         return _OUT_OF_SCOPE_MSG, ""
 
     # Build evidence-first prompt
@@ -164,50 +177,186 @@ def answer_question(question: str, year_filter: str) -> tuple:
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 
+APP_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+:root {
+    --bg: #f7f8f5;
+    --surface: #ffffff;
+    --surface-2: #f0f4ee;
+    --line: #dbe3d8;
+    --text: #18211b;
+    --muted: #617064;
+    --accent: #2f8f5b;
+    --accent-hover: #257347;
+    --focus: rgba(47, 143, 91, 0.18);
+}
+
+body, .gradio-container {
+    background: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+.gradio-container {
+    max-width: 1040px !important;
+    margin: 0 auto !important;
+    padding: 28px 18px !important;
+}
+
+footer, .footer, .built-with { display: none !important; }
+
+#app-shell {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface);
+    box-shadow: 0 18px 50px rgba(24, 33, 27, 0.08);
+}
+
+#app-header {
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    background: var(--surface);
+}
+
+#app-header h1 {
+    margin: 0;
+    font-size: 20px;
+    line-height: 1.2;
+    letter-spacing: 0;
+}
+
+#app-header .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+#app-header .meta span {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 5px 9px;
+    background: var(--surface-2);
+}
+
+#main-panel {
+    padding: 22px;
+}
+
+#question-box textarea,
+#answer-box textarea {
+    border-radius: 8px !important;
+    border: 1px solid var(--line) !important;
+    color: var(--text) !important;
+    font-size: 15px !important;
+    line-height: 1.6 !important;
+    box-shadow: none !important;
+}
+
+#question-box textarea:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px var(--focus) !important;
+}
+
+#ask-btn {
+    border-radius: 8px !important;
+    background: var(--accent) !important;
+    border: none !important;
+    color: white !important;
+    font-weight: 600 !important;
+    height: 44px !important;
+}
+
+#ask-btn:hover {
+    background: var(--accent-hover) !important;
+}
+
+#refs-box {
+    border-top: 1px solid var(--line);
+    padding: 16px 22px 20px;
+    background: var(--surface-2);
+}
+
+#refs-box p, #refs-box li {
+    color: var(--muted);
+    font-size: 14px;
+}
+
+@media (max-width: 720px) {
+    .gradio-container {
+        padding: 0 !important;
+    }
+    #app-shell {
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+    }
+    #app-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    #app-header .meta {
+        justify-content: flex-start;
+    }
+    #main-panel {
+        padding: 16px;
+    }
+}
+"""
+
 with gr.Blocks(
     title="Bean Lab Research QA",
-    theme=gr.themes.Soft(),
-    css=".answer-box textarea { font-size: 15px !important; line-height: 1.6 !important; }"
+    theme=gr.themes.Base(),
+    css=APP_CSS,
 ) as demo:
 
-    gr.Markdown("""
-    # 🌱 Bean Lab Research QA System
-    **Q&A over 1,067 agricultural research papers (1961–2026)**
+    with gr.Column(elem_id="app-shell"):
+        gr.HTML("""
+        <div id="app-header">
+          <h1>Bean Lab Research QA</h1>
+          <div class="meta">
+            <span>1,067 papers</span>
+            <span>1961-2026</span>
+            <span>DOI citations</span>
+          </div>
+        </div>
+        """)
 
-    Ask any question about bean and legume crop research.
-    Answers are grounded in scientific papers with explicit confidence labels.
-    """)
+        with gr.Column(elem_id="main-panel"):
+            with gr.Row():
+                with gr.Column(scale=3):
+                    question_input = gr.Textbox(
+                        label="Question",
+                        placeholder="What diseases affect bean crops and how can they be managed?",
+                        lines=3,
+                        elem_id="question-box",
+                    )
+                with gr.Column(scale=1):
+                    year_filter = gr.Dropdown(
+                        label="Time period",
+                        choices=["All years", "1961-2006", "2007-2026"],
+                        value="All years",
+                    )
 
-    with gr.Row():
-        with gr.Column(scale=3):
-            question_input = gr.Textbox(
-                label="Your Question",
-                placeholder="e.g. What are the main diseases affecting bean crops and how can they be managed?",
-                lines=3,
+            ask_btn = gr.Button("Ask", variant="primary", size="lg", elem_id="ask-btn")
+
+            answer_output = gr.Textbox(
+                label="Answer",
+                lines=14,
+                interactive=False,
+                elem_id="answer-box",
             )
-        with gr.Column(scale=1):
-            year_filter = gr.Dropdown(
-                label="Time Period",
-                choices=["All years", "1961-2006", "2007-2026"],
-                value="All years",
-            )
 
-    ask_btn = gr.Button("Ask", variant="primary", size="lg")
-
-    answer_output = gr.Textbox(
-        label="Answer",
-        lines=14,
-        interactive=False,
-        elem_classes=["answer-box"],
-    )
-
-    references_output = gr.Markdown(label="References")
-
-    gr.Markdown("""
-    ---
-    **Database:** 1,067 bean/legume research papers (1961–2026) | Bean Lab, MSU |
-    [GitHub](https://github.com/ParimalnathReddy/bean-lab-qa)
-    """)
+        with gr.Column(elem_id="refs-box"):
+            references_output = gr.Markdown(label="References")
 
     ask_btn.click(
         fn=answer_question,

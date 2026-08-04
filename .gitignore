@@ -9,12 +9,23 @@ data/embeddings_metadata.json
 data/processing_metadata.json
 data/qa_results_*.json
 data/checkpoint_*.json
+# leftover from the pre-Change-2 hybrid system, deleted — see HYBRID_RAG_UPGRADE.md
+data/bm25_index.json
 
 # ── Vector database (396MB, regenerate with build_vector_store.sb) ────────────
 vector_db/
 
 # ── Ollama models (4.9GB, download with scripts/download_llama_model.sh) ──────
 models/
+
+# ── Independently-deployed copies (each has its own git remote — HF Space /
+#    HF Dataset repo — and is pushed there directly, not through GitHub) ──────
+hf_space/
+hf_dataset_upload/
+
+# ── GraphRAG working data (regenerate via scripts/build_paper_graph.py etc.,
+#    or download the built artifacts from the HF dataset repo) ────────────────
+graphrag_workspace/
 
 # ── SLURM logs (job-specific, not useful for others) ─────────────────────────
 logs/
@@ -27,6 +38,7 @@ __pycache__/
 
 # ── Conda / virtual environments ──────────────────────────────────────────────
 env/
+envs/
 venv/
 .env
 *.egg-info/

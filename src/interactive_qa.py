@@ -9,10 +9,13 @@ Improvements over v1:
   - Evidence-first chain-of-thought prompting
   - Explicit SUPPORTED / PARTIALLY_SUPPORTED / INFERRED / UNSUPPORTED labels
   - Soft failure: always attempts answer, never hard-refuses
+  - Hybrid BM25+dense retrieval (Reciprocal Rank Fusion) is automatic inside
+    BeanRetriever whenever vector_db/bm25_index.pkl exists — no flag needed
 """
 
 import sys
 import time
+import os
 import requests
 import chromadb
 from chromadb.config import Settings
@@ -27,6 +30,7 @@ MODEL       = "llama3.1:8b"
 OLLAMA_HOST = "localhost:11434"
 TOP_K       = 10
 N_CANDIDATES = 20
+STRICT_EVIDENCE = os.environ.get("BEAN_QA_STRICT_EVIDENCE", "").lower() in {"1", "true", "yes"}
 
 
 # ── ChromaDB ──────────────────────────────────────────────────────────────────
@@ -73,8 +77,12 @@ Commands:
   /year 2007-2026     Filter to papers from 2007-2026
   /year off           Remove year filter
   /sources <n>        Set number of sources to retrieve (default: 10)
+  /strict on|off      Enable/disable insufficient-evidence fallback
   /help               Show this help
   /quit               Exit
+
+Note: hybrid BM25+dense retrieval is automatic whenever
+vector_db/bm25_index.pkl exists — no command needed to enable it.
 """
 
 
@@ -100,9 +108,12 @@ def run():
     collection = load_collection()
     print(f"OK ({collection.count()} chunks)")
 
+    strict_evidence = STRICT_EVIDENCE
+
     retriever = BeanRetriever(collection)
     print("Loading cross-encoder reranker...", flush=True)
     retriever._load_cross_encoder()  # pre-load so first query isn't slow
+    retriever._load_bm25()           # reports whether hybrid BM25 is available
 
     print(HELP_TEXT)
 
@@ -143,10 +154,19 @@ def run():
             except ValueError:
                 print("Usage: /sources <number>")
             continue
+        elif query.startswith("/strict "):
+            arg = query.split(" ", 1)[1].strip().lower()
+            if arg in ("on", "off"):
+                strict_evidence = arg == "on"
+                print(f"Strict evidence fallback: {'ON' if strict_evidence else 'OFF'}")
+            else:
+                print("Usage: /strict on | /strict off")
+            continue
 
         # ── Retrieve ──────────────────────────────────────────────────────────
         filter_label = f" [filter: {year_filter}]" if year_filter else ""
-        print(f"\nSearching{filter_label} (expand → retrieve {N_CANDIDATES} → rerank → top {top_k})...",
+        mode_label = "hybrid BM25+vector" if retriever._bm25 is not None else "vector"
+        print(f"\nSearching{filter_label} ({mode_label} → retrieve {N_CANDIDATES} → rerank → top {top_k})...",
               flush=True)
 
         t0 = time.time()
@@ -161,6 +181,14 @@ def run():
             print(f"Retrieval error: {e}")
             continue
         retrieval_time = time.time() - t0
+
+        if strict_evidence and confidence == "UNSUPPORTED":
+            print_separator()
+            print(f"CONFIDENCE: {confidence}")
+            print("\nANSWER:\nInsufficient evidence found in the indexed Bean Lab papers.")
+            print(f"\nTiming: retrieval={retrieval_time:.2f}s | generation=0.00s")
+            print_separator()
+            continue
 
         # ── Generate ──────────────────────────────────────────────────────────
         prompt = build_ollama_prompt(query, chunks, confidence)

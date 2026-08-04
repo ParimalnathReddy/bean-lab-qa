@@ -42,9 +42,9 @@ def test_vector_store():
     # Create test data
     print("Creating test data...")
 
-    # Sample embeddings (5 chunks, 384 dimensions)
+    # Sample embeddings (5 chunks, 1024 dimensions — matches BAAI/bge-large-en-v1.5)
     np.random.seed(42)
-    test_embeddings = np.random.randn(5, 384).astype(np.float32)
+    test_embeddings = np.random.randn(5, 1024).astype(np.float32)
     # Normalize for cosine similarity
     test_embeddings = test_embeddings / np.linalg.norm(test_embeddings, axis=1, keepdims=True)
 
@@ -118,9 +118,14 @@ def test_vector_store():
         collection = builder.collection
 
         # Test 1: Semantic search
+        # NOTE: uses a random query_embeddings vector (not query_texts) so this
+        # test doesn't depend on ChromaDB's own default embedding function,
+        # which is a different, smaller-dimension model than BAAI/bge-large-en-v1.5.
         print("1. Semantic search: 'bean breeding'")
+        query_vec = np.random.randn(1024).astype(np.float32)
+        query_vec = (query_vec / np.linalg.norm(query_vec)).tolist()
         results = collection.query(
-            query_texts=["bean breeding"],
+            query_embeddings=[query_vec],
             n_results=2
         )
         print(f"   Found {len(results['ids'][0])} results")
@@ -131,7 +136,7 @@ def test_vector_store():
         # Test 2: Filtered search
         print("2. Filtered search: 'drought' WHERE year_range='2007-2026'")
         results = collection.query(
-            query_texts=["drought resistance"],
+            query_embeddings=[query_vec],
             n_results=2,
             where={"year_range": "2007-2026"}
         )

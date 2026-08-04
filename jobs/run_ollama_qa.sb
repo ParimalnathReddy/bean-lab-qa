@@ -41,9 +41,9 @@ module purge
 module load Ollama/0.15.5
 
 # Activate conda environment using hardcoded path (avoids module conflict with Python)
-CONDA_BASE="/mnt/scratch/kodumuru/conda"
+CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate bean_llm
+conda activate /mnt/scratch/kodumuru/conda/envs/bean_llm
 
 echo "Python version:"
 python3 --version
@@ -92,6 +92,11 @@ echo ""
 echo "Running QA system..."
 echo ""
 
+# Hybrid BM25+dense retrieval (Reciprocal Rank Fusion) is automatic inside
+# BeanRetriever whenever vector_db/bm25_index.pkl exists (built alongside
+# ChromaDB by build_vector_store.py) — no flag needed here. Add
+# --strict-evidence to return "insufficient evidence" instead of generating
+# on UNSUPPORTED-confidence retrieval.
 python3 src/qa_with_ollama.py \
     --vector-db "${PROJECT_DIR}/vector_db" \
     --chunks-file "${PROJECT_DIR}/data/processed_chunks.json" \

@@ -11,7 +11,7 @@ Design principles:
   6. Citation format: doi:10.XXXX/suffix (no generic [Source N] labels)
 """
 
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 DISTANCE_THRESHOLD = 0.85   # chunks above this are included but flagged as weak
 
@@ -56,7 +56,11 @@ def build_context(chunks: List[Dict]) -> str:
     """
     lines = []
     for i, c in enumerate(chunks, 1):
-        dist = c.get("distance", 1.0)
+        # BM25-only chunks (hybrid retrieval, no dense match) have
+        # distance=None — treat as worst-case rather than crashing the
+        # comparison below (None > threshold raises TypeError).
+        dist = c.get("distance")
+        dist = 1.0 if dist is None else dist
         section_tag = get_section_tag(c.get("section", ""))
         quality = "⚠ WEAK EVIDENCE" if dist > DISTANCE_THRESHOLD else ""
 
@@ -99,6 +103,11 @@ CITATION RULES:
 • Only cite a source when it directly supports the specific claim in that sentence
 • Sources marked ⚠ WEAK EVIDENCE should only be cited when no stronger source exists
 
+TRIAL DATA (when a TRIAL DATA section is present above the retrieved sources):
+• Trial data rows are exact numbers pulled from the corpus for the specific cultivar/location/year asked about — prefer them over paraphrasing a similar number from a retrieved passage
+• These rows were extracted automatically from paper tables and may occasionally contain transcription errors — cite them the same way as any other source (doi:..., p.N) so the user can check the original if precision matters
+• Use the surrounding literature sources to explain what the trial numbers mean, how they compare to other findings, and why they matter — the trial data gives precision, the literature gives interpretation
+
 IMPORTANT:
 • Never refuse to answer — give your best answer based on what the sources contain
 • If the sources only partially address the question, answer what you can and briefly note what is not covered
@@ -107,14 +116,27 @@ IMPORTANT:
 
 # ── Prompt builders ───────────────────────────────────────────────────────────
 
-def build_messages(question: str, chunks: List[Dict], confidence: str = "") -> List[Dict]:
+def build_messages(
+    question: str,
+    chunks: List[Dict],
+    confidence: str = "",
+    trial_data_block: str = "",
+) -> List[Dict]:
     """
     Build OpenAI-style messages list for chat completion API (HF Spaces / any chat LLM).
 
     Args:
-        question:   User's question
-        chunks:     Retrieved and reranked chunks
-        confidence: Retrieval confidence label from BeanRetriever
+        question:         User's question
+        chunks:           Retrieved and reranked chunks
+        confidence:       Retrieval confidence label from BeanRetriever
+        trial_data_block: Pre-formatted structured trial-data section — pass
+                          structured_data.format_trial_results(rows) here, or
+                          "" if the query router (Change 7) didn't activate
+                          structured data for this question. Deliberately a
+                          pre-formatted string rather than raw rows: the row
+                          schema and its formatting belong to
+                          structured_data.py, not here — this module only
+                          places the block, it doesn't know the row shape.
     """
     context = build_context(chunks)
 
@@ -125,7 +147,10 @@ def build_messages(question: str, chunks: List[Dict], confidence: str = "") -> L
             "Answer as fully as you can from the evidence, and briefly note any gaps."
         )
 
+    trial_section = f"{trial_data_block}\n\n" if trial_data_block else ""
+
     user_content = (
+        f"{trial_section}"
         f"RETRIEVED SOURCES:\n\n{context}\n"
         f"{confidence_note}\n"
         f"QUESTION: {question}"
@@ -137,14 +162,48 @@ def build_messages(question: str, chunks: List[Dict], confidence: str = "") -> L
     ]
 
 
-def build_ollama_prompt(question: str, chunks: List[Dict], confidence: str = "") -> str:
+def build_messages_with_history(
+    question: str,
+    chunks: List[Dict],
+    confidence: str,
+    history: List[Tuple[str, str]],
+    trial_data_block: str = "",
+) -> List[Dict]:
+    """
+    Like build_messages(), but prepends prior conversation turns (Change 8)
+    so follow-up questions ("which of those are in navy bean?") have their
+    antecedent available to the LLM.
+
+    Args:
+        history: (question, answer) tuples, oldest first, already trimmed by
+                  the caller to whatever window it wants replayed (the Space
+                  keeps the last 3). Only the plain question/answer text is
+                  replayed — NOT that turn's retrieved sources or trial-data
+                  block — so the prompt doesn't grow by a full context dump
+                  per turn. This means the model reasons about earlier
+                  answers by their conclusions, not by re-deriving them from
+                  the original evidence each time; retrieval for the CURRENT
+                  turn is what supplies fresh, current evidence.
+    """
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for prev_q, prev_a in history:
+        messages.append({"role": "user", "content": prev_q})
+        messages.append({"role": "assistant", "content": prev_a})
+    current_turn = build_messages(question, chunks, confidence, trial_data_block=trial_data_block)
+    messages.append(current_turn[-1])
+    return messages
+
+
+def build_ollama_prompt(
+    question: str,
+    chunks: List[Dict],
+    confidence: str = "",
+    trial_data_block: str = "",
+) -> str:
     """
     Build a single prompt string for Ollama (non-chat models or llama3 instruct format).
 
-    Args:
-        question:   User's question
-        chunks:     Retrieved and reranked chunks
-        confidence: Retrieval confidence label from BeanRetriever
+    Args: see build_messages() — same trial_data_block convention.
     """
     context = build_context(chunks)
 
@@ -155,10 +214,13 @@ def build_ollama_prompt(question: str, chunks: List[Dict], confidence: str = "")
             "Answer as fully as you can from the evidence, and briefly note any gaps.\n"
         )
 
+    trial_section = f"{trial_data_block}\n\n" if trial_data_block else ""
+
     return (
         f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
         f"{SYSTEM_PROMPT}<|eot_id|>"
         f"<|start_header_id|>user<|end_header_id|>\n"
+        f"{trial_section}"
         f"RETRIEVED SOURCES:\n\n{context}\n"
         f"{confidence_note}"
         f"QUESTION: {question}<|eot_id|>"
@@ -175,7 +237,8 @@ def format_references(chunks: List[Dict]) -> str:
     refs = []
     for c in chunks:
         doi = c.get("doi", "")
-        dist = c.get("distance", 1.0)
+        dist = c.get("distance")
+        dist = 1.0 if dist is None else dist
         if doi and doi not in seen:
             seen.add(doi)
             flag = " *(weak evidence)*" if dist > DISTANCE_THRESHOLD else ""

@@ -1,0 +1,181 @@
+#!/bin/bash
+# =============================================================================
+# SLURM job: Build GraphRAG knowledge graph index (fully local via Ollama)
+#
+# What this does:
+#   1. Starts Ollama server on the V100 GPU
+#   2. Pulls nomic-embed-text embedding model (if not cached)
+#   3. Runs graphrag.index — llama3.1:8b for LLM, nomic-embed-text for embeddings
+#   4. Produces Parquet files in graphrag_workspace/output/
+#
+# No API keys needed. No rate limits. No cost.
+# Cache in graphrag_workspace/cache/ — safe to resubmit if killed.
+#
+# Submit: sbatch jobs/build_graphrag.sb
+# Watch:  tail -f logs/graphrag_<JOBID>.out
+# =============================================================================
+
+#SBATCH --job-name=graphrag_index
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/graphrag_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/graphrag_%j.err
+#SBATCH --time=4-00:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32GB
+#SBATCH --gpus=v100:1
+#SBATCH --partition=general-long-gpu
+#SBATCH --nodes=1
+
+set -euo pipefail
+
+PROJECT="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "${PROJECT}"
+
+# ── Clear system modules and Python path pollution ────────────────────────────
+module purge
+unset PYTHONPATH
+
+# ── Load required modules ─────────────────────────────────────────────────────
+module load CUDA/12.1.1
+module load Ollama/0.15.5
+
+# ── Activate conda environment (stored in research fs, never purged) ──────────
+CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
+CONDA_ENV="${PROJECT}/envs/bean_llm"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+
+if [[ ! -f "${CONDA_ENV}/bin/python" ]]; then
+    echo "Conda env not found — creating at ${CONDA_ENV} ..."
+    conda create -p "${CONDA_ENV}" python=3.10 -y --quiet
+    conda run -p "${CONDA_ENV}" pip install "graphrag==2.1.0" pyarrow pandas --quiet
+    echo "  Conda env created."
+fi
+
+conda activate "${CONDA_ENV}"
+
+# ── Fix libstdc++ version mismatch ────────────────────────────────────────────
+export LD_LIBRARY_PATH="${CONDA_ENV}/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONUNBUFFERED=1
+
+echo "============================================"
+echo "  Bean Lab GraphRAG Indexing (Local Ollama)"
+echo "  Job ID  : ${SLURM_JOB_ID}"
+echo "  Node    : $(hostname)"
+echo "  GPU     : ${CUDA_VISIBLE_DEVICES:-none}"
+echo "  Started : $(date)"
+echo "============================================"
+
+# ── Start Ollama server ───────────────────────────────────────────────────────
+export OLLAMA_MODELS="${PROJECT}/models/ollama"
+export OLLAMA_HOST="0.0.0.0:11434"
+export OLLAMA_NUM_PARALLEL=1
+
+mkdir -p "${OLLAMA_MODELS}" logs
+
+echo "Starting Ollama server..."
+ollama serve > logs/ollama_${SLURM_JOB_ID}.log 2>&1 &
+OLLAMA_PID=$!
+
+# Wait for Ollama to be ready
+echo "Waiting for Ollama to be ready..."
+for i in $(seq 1 30); do
+    if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+        echo "  Ollama ready after ${i}s"
+        break
+    fi
+    sleep 2
+done
+
+# ── Pull embedding model if not already present ───────────────────────────────
+echo ""
+echo "Checking models..."
+if ollama list | grep -q "nomic-embed-text"; then
+    echo "  nomic-embed-text already present"
+else
+    echo "  Pulling nomic-embed-text (~274MB)..."
+    ollama pull nomic-embed-text
+fi
+
+if ollama list | grep -q "llama3.1:8b"; then
+    echo "  llama3.1:8b already present"
+else
+    echo "  Pulling llama3.1:8b (~4.7GB)..."
+    ollama pull llama3.1:8b
+fi
+
+ollama list
+
+# ── Check graphrag is installed ───────────────────────────────────────────────
+if ! python3 -c "import graphrag" 2>/dev/null; then
+    echo "graphrag not found — installing..."
+    pip install "graphrag==2.1.0" --quiet
+fi
+echo "graphrag version: $(graphrag --version 2>/dev/null || echo 'unknown')"
+
+# ── Step 1: Prepare input text files ─────────────────────────────────────────
+echo ""
+echo "--- Step 1: Preparing input text files ---"
+
+INPUT_DIR="${PROJECT}/graphrag_workspace/input"
+N_EXISTING=$(ls "${INPUT_DIR}"/*.txt 2>/dev/null | wc -l || echo 0)
+
+if [[ "${N_EXISTING}" -ge 900 ]]; then
+    echo "  ${N_EXISTING} input files already exist — skipping preparation."
+else
+    echo "  Found ${N_EXISTING} files; running prepare_graphrag_input.py ..."
+    python3 scripts/prepare_graphrag_input.py
+fi
+
+echo "  Input files: $(ls graphrag_workspace/input/*.txt | wc -l)"
+
+# ── Step 2: Run GraphRAG indexing ────────────────────────────────────────────
+echo ""
+echo "--- Step 2: Running GraphRAG indexing (local Ollama) ---"
+echo "  LLM:        llama3.1:8b"
+echo "  Embeddings: nomic-embed-text"
+echo "  Cache:      graphrag_workspace/cache/ (resume-safe)"
+echo ""
+
+cd "${PROJECT}/graphrag_workspace"
+graphrag index --root .
+
+# ── Step 3: Verify outputs ───────────────────────────────────────────────────
+echo ""
+echo "--- Step 3: Verifying outputs ---"
+cd "${PROJECT}"
+
+EXPECTED_FILES=(
+    "graphrag_workspace/output/entities.parquet"
+    "graphrag_workspace/output/relationships.parquet"
+    "graphrag_workspace/output/communities.parquet"
+    "graphrag_workspace/output/community_reports.parquet"
+    "graphrag_workspace/output/text_units.parquet"
+)
+
+ALL_OK=true
+for f in "${EXPECTED_FILES[@]}"; do
+    if [[ -f "${f}" ]]; then
+        SIZE=$(du -sh "${f}" | cut -f1)
+        echo "  ✓ ${f}  (${SIZE})"
+    else
+        echo "  ✗ MISSING: ${f}"
+        ALL_OK=false
+    fi
+done
+
+# Stop Ollama server
+kill "${OLLAMA_PID}" 2>/dev/null || true
+
+if $ALL_OK; then
+    echo ""
+    echo "============================================"
+    echo "  GraphRAG indexing COMPLETE"
+    echo "  Finished : $(date)"
+    echo ""
+    echo "  Next step: run scripts/export_graphrag_summaries.py"
+    echo "============================================"
+else
+    echo ""
+    echo "Some output files are missing — check logs for errors."
+    exit 1
+fi

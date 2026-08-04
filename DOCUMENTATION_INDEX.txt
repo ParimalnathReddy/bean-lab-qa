@@ -1,460 +1,2510 @@
 ================================================================================
-                    COMPLETE DOCUMENTATION INDEX
-           HPCC LLM-Based Document QA System - Bean Lab
+  BEAN LAB LLM QA SYSTEM — COMPLETE TECHNICAL DOCUMENTATION
+  Project: BeanLab Retrieval-Augmented Generation (RAG) QA System
+  Institution: Michigan State University — Bean Lab (HPCC)
+  Deployment: HuggingFace Spaces  →  Parimalanath/bean-lab-qa
+  Dataset Repo: HuggingFace Datasets  →  Parimalanath/bean-lab-vector-db
+  Created: April 4, 2026
+  Last Updated: August 3, 2026 — covers Changes 1-8 (embedding upgrade,
+    hybrid retrieval, faithfulness verification, RAGAS evaluation, gene
+    validation, structured data layer, query router, conversation memory)
 ================================================================================
 
-PROJECT LOCATION: /mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/
+TABLE OF CONTENTS
+-----------------
+  1.  What This Project Does (Plain English)
+  2.  High-Level Architecture
+  3.  Repository Structure (Every File Explained)
+  4.  STEP 1 — HPCC Environment Setup
+  5.  STEP 2 — PDF Collection & Organisation
+  6.  STEP 3 — PDF Processing Pipeline  (src/pdf_processor.py)
+  7.  STEP 4 — Embedding Generation  (src/generate_embeddings.py)
+  8.  STEP 5 — Vector Store + BM25 Index Building  (src/build_vector_store.py)
+  9.  STEP 6 — Retrieval System  (src/retriever.py)
+  10. STEP 7 — Prompt Engineering  (src/prompts.py)
+  11. STEP 8 — Local QA Testing on HPCC  (src/qa_with_ollama.py)
+  12. STEP 9 — Evaluation Benchmark  (src/eval_qa.py + benchmark_questions.py)
+  13. STEP 10 — HuggingFace Spaces Deployment  (hf_space/)
+  14. STEP 11 — HF Dataset Repo for the Vector DB
+  15. STEP 12 — Hybrid BM25 + RRF Retrieval  (Change 2)
+  16. STEP 13 — Faithfulness Verification / Self-RAG Lite  (Change 3)
+  17. STEP 14 — RAGAS Evaluation Pipeline  (Change 4, src/eval_ragas.py)
+  18. STEP 15 — Gene/Locus Validation  (Change 5, src/gene_validator.py)
+  19. STEP 16 — Structured Trial-Data Layer  (Change 6, src/structured_data.py)
+  20. STEP 17 — Query Router  (Change 7, src/query_router.py)
+  21. STEP 18 — Conversation Memory  (Change 8, hf_space/app.py + prompts.py)
+  22. Key Errors Encountered and How They Were Fixed
+  23. SLURM Job Scripts Reference  (jobs/)
+  24. Conda Environment & Python Dependencies
+  25. API Keys & Secrets Reference
+  26. How to Re-Run Everything from Scratch
+
 
 ================================================================================
-📚 START HERE
+1. WHAT THIS PROJECT DOES (PLAIN ENGLISH)
 ================================================================================
 
-1. README.md
-   └─ Central navigation hub
-   └─ Quick links to all documentation
-   └─ Common tasks reference
-   └─ READ THIS FIRST!
+The Bean Lab has over 1,000 peer-reviewed scientific papers about bean and
+legume crop science — covering diseases, drought, nitrogen fixation, breeding,
+agronomic management, and more. These papers span 65 years (1961–2026).
 
-2. QUICK_START.md
-   └─ Get started in 5 minutes
-   └─ Installation commands
-   └─ Basic usage examples
-   └─ For new users
+Before this system, a researcher wanting to find a fact (e.g. "what nitrogen
+fixation rates have been measured for common bean?") had to manually search
+PDFs. This is slow and misses connections across papers.
+
+This project builds a web application where a researcher types a question in
+plain English and gets a detailed, cited answer drawn from the actual papers
+within a few seconds — completely free to use.
+
+The core technology is RAG (Retrieval-Augmented Generation). Instead of asking
+an AI to answer from memory (which hallucinations), the system:
+  1. Converts all paper text into a searchable vector database
+  2. When a question arrives, searches that database for the most relevant
+     paragraphs across all papers (now hybrid: dense + keyword search, STEP 12)
+  3. Shows those paragraphs to an LLM and asks it to synthesise an answer
+     from only the retrieved evidence — citing exact DOIs
+  4. Checks the answer for unsupported claims (STEP 13) and fabricated gene
+     names (STEP 15) before showing it to the user
+
+As of Changes 1-7, the system also:
+  - Pulls exact numbers from a structured trial-data database when a question
+    asks about a specific cultivar/location/year, instead of only hoping a
+    paper chunk mentions them (STEP 16)
+  - Decides which of these extra subsystems to activate per question via a
+    lightweight rule-based router, not a single LLM classifier call (STEP 17)
+  - Is evaluated with LLM-judged RAGAS metrics (faithfulness, answer
+    relevancy, context precision/recall) in addition to keyword-rubric
+    scoring (STEP 14)
+
+This means the AI cannot make things up undetected: every claim in its answer
+must come from text that is physically present in the retrieved paragraphs,
+and the system now actively checks for the cases where that still goes wrong.
+
 
 ================================================================================
-📖 CORE DOCUMENTATION (Read in this order)
+2. HIGH-LEVEL ARCHITECTURE
 ================================================================================
 
-Level 1: Getting Started
-├─ QUICK_START.md                    (5 min read)
-│  └─ Installation, setup, first run
+OFFLINE (runs once on HPCC, mostly GPU, some CPU-only):
+  PDF files  →  [pdf_processor.py]  →  processed_chunks.json
+                                             ↓
+                                  [generate_embeddings.py]  (GPU, BAAI/bge-large-en-v1.5)
+                                             ↓
+                                       embeddings.npy (1024-dim)
+                                       embeddings_metadata.json
+                                             ↓
+                                  [build_vector_store.py]
+                                             ↓
+                        ┌────────────────────┼────────────────────┐
+                        ↓                    ↓                    ↓
+                  vector_db/            vector_db/           (separately:)
+                  chroma.sqlite3        bm25_index.pkl       [build_gene_index.py]
+                  (ChromaDB, ~1 GB)     (RRF hybrid,          → vector_db/gene_index.pkl
+                                         Change 2)              (NCBI Gene + UniProt,
+                                                                 taxid 3885)
+                                                              [extract_structured_data.py]
+                                                              → vector_db/trial_data.db
+                                                                (LLM-extracted trial data,
+                                                                 Change 6)
+
+ONLINE (runs on HuggingFace Spaces, free, 24/7):
+  User question
+       ↓
+  [app.py startup: snapshot_download entire vector_db/ from HF Dataset repo —
+   chroma.sqlite3, bm25_index.pkl, gene_index.pkl, trial_data.db all come for
+   free through the same download, no extra app.py logic needed]
+       ↓
+  [query_router.route(question)]  ← rule-based, no LLM call (STEP 17)
+   sets three independent flags: use_literature (~always True),
+   use_structured_data, run_gene_validation — plus the actual matched
+   cultivar/location/year/trait/gene entities, not just booleans
+       ↓
+       ├─────────────────────────────┬─────────────────────────────┐
+       ↓ (parallel, ThreadPoolExecutor)                             ↓
+  [BeanRetriever.retrieve()]                              [structured_data.query_trial_data()]
+   expand_query() → hybrid dense+BM25 → RRF fuse           (if use_structured_data — SQLite,
+   → cross-encoder rerank → confidence label                sub-millisecond, STEP 16)
+       ↓                                                             ↓
+       └─────────────────────────────┬─────────────────────────────┘
+                                      ↓
+                     [build_messages()]  ← TRIAL DATA section (if any) placed
+                                            before RETRIEVED SOURCES (STEP 7)
+                                      ↓
+                          [4-Tier LLM Waterfall]
+                            Tier 1: Gemini 2.0 Flash (primary, 1M TPM free)
+                            Tier 2a: Groq — Llama 3.3 70B
+                            Tier 2b: Groq — Mixtral 8x7B
+                            Tier 3: OpenRouter (auto-routes to best free model)
+                            Tier 4: Together AI — DeepSeek R1 (last resort)
+                                      ↓
+                          Natural prose answer + DOI references
+                                      ↓
+                   [_verify_faithfulness()]  ← direct Gemini call, checks
+                                                each claim against retrieved
+                                                sources (STEP 13)
+                                      ↓
+                   [gene_validator.extract_gene_mentions() + validate_genes()]
+                    ← runs unconditionally (free check), not gated by the
+                      router's run_gene_validation flag (STEP 15)
+                                      ↓
+                          Answer + faithfulness footer (if flagged) +
+                          gene verification footer (if genes mentioned) +
+                          references  →  Gradio UI
+
+
+================================================================================
+3. REPOSITORY STRUCTURE (EVERY FILE EXPLAINED)
+================================================================================
+
+hpcc-llm-qa/
 │
-├─ README.md                         (10 min read)
-│  └─ Project overview, navigation, common tasks
+├── src/                             Core Python pipeline modules
+│   ├── pdf_processor.py             STEP 3: Extract text from PDFs, chunk it
+│   ├── pdf_processor_commented.py   Heavily commented version for learning
+│   ├── generate_embeddings.py       STEP 4: Create vector embeddings on GPU
+│   ├── build_vector_store.py        STEP 5: ChromaDB + BM25 index (Change 2)
+│   ├── retriever.py                 STEP 6/12: Query expansion, hybrid
+│   │                                 retrieval (RRF), cross-encoder rerank
+│   ├── prompts.py                   STEP 7: System prompt + message builders
+│   │                                 (now also places TRIAL DATA sections)
+│   ├── qa_with_ollama.py            STEP 8: Batch QA — routes, retrieves,
+│   │                                 generates, gene-validates (Change 7)
+│   ├── benchmark_questions.py       STEP 9: shared 75-question bank (Change 4)
+│   │                                 imported by both eval_qa.py and eval_ragas.py
+│   ├── eval_qa.py                   STEP 9: coarse keyword-rubric scoring
+│   ├── eval_ragas.py                STEP 14: LLM-judged RAGAS metrics (Change 4)
+│   ├── query_router.py              STEP 17: rule-based routing (Change 7)
+│   ├── gene_validator.py            STEP 15: gene mention extraction +
+│   │                                 NCBI/UniProt/classical validation (Change 5)
+│   ├── build_gene_index.py          STEP 15: builds vector_db/gene_index.pkl
+│   ├── structured_data.py           STEP 16: SQLite trial-data query interface
+│   │                                 (Change 6)
+│   ├── extract_structured_data.py   STEP 16: LLM-extracts trial data from
+│   │                                 paper chunks into vector_db/trial_data.db
+│   ├── interactive_qa.py            Command-line interactive QA wrapper
+│   ├── test_embeddings.py           Unit test: embedding shape + similarity
+│   ├── test_processor.py            Unit test: PDF text extraction
+│   └── test_vector_store.py         Unit test: ChromaDB CRUD queries
 │
-└─ config/HPCC_SETUP_GUIDE.md        (15 min read)
-   └─ HPCC modules, conda, SLURM, file systems
-
-Level 2: User Guide
-├─ README_PDF_PROCESSOR.md           (15 min read)
-│  └─ Complete user manual
-│  └─ All features explained
-│  └─ Configuration options
-│  └─ Troubleshooting
+├── hf_space/                        HuggingFace Space deployment files —
+│   │                                 everything below is imported by hf_space/app.py
+│   │                                 and MUST be a separate copy (the Space only
+│   │                                 packages this directory, not the whole repo)
+│   ├── app.py                       Main Gradio app (the live web application)
+│   ├── retriever.py                 NOT synced with src/retriever.py — diverged
+│   │                                 (see STEP 10 and ERROR 11); both received
+│   │                                 every later retrieval upgrade independently
+│   ├── prompts.py                   Synced copy of src/prompts.py (kept identical
+│   │                                 on every change so far — verify this stays true)
+│   ├── gene_validator.py            Identical copy of src/gene_validator.py
+│   ├── structured_data.py           Identical copy of src/structured_data.py
+│   ├── query_router.py              Identical copy of src/query_router.py
+│   ├── requirements.txt             Python packages installed by HF at build time
+│   ├── README.md                    HF Space metadata (title, sdk version, etc.)
+│   └── vector_db/                   REMOVED — now lives in HF Dataset repo
 │
-└─ PDF_ANALYSIS.md                   (10 min read)
-   └─ Dataset statistics (1,067 PDFs)
-   └─ File organization
-   └─ Sample commands
-
-Level 3: Developer Documentation
-├─ CODE_DOCUMENTATION.md             (30 min read)
-│  └─ Complete code architecture
-│  └─ Function reference
-│  └─ Algorithm explanations
-│  └─ Data flow diagrams
-│  └─ Error handling strategies
+├── deploy/                          Simpler standalone Gradio app (not the
+│   │                                 live Space) — single Qwen model via HF
+│   │                                 InferenceClient, no Gemini waterfall, no
+│   │                                 faithfulness check or gene-validation
+│   │                                 footer wired in (see STEP 10)
+│   ├── app.py                       Standalone app, imports from ../src directly
+│   │                                 (so it automatically gets hybrid retrieval,
+│   │                                 the query router, etc. — no separate copies
+│   │                                 needed the way hf_space/ requires)
+│   └── requirements.txt
 │
-└─ src/pdf_processor_commented.py    (Code review)
-   └─ Line-by-line code comments
-   └─ Every function explained
-   └─ Algorithm walkthrough
-
-================================================================================
-💻 CODE FILES (All fully commented)
-================================================================================
-
-Production Code:
-├─ src/pdf_processor.py              (595 lines)
-│  └─ Main processor (use this for production)
-│  └─ Standard Python docstrings
+├── data/
+│   ├── pdfs/                        1,067 PDF research papers (NOT in git)
+│   ├── processed_chunks.json        All text chunks from all PDFs (~21,876 chunks)
+│   ├── embeddings.npy               1024-dim float32 vectors (one per chunk)
+│   ├── embeddings_metadata.json     Per-chunk metadata + generation stats
+│   ├── processing_metadata.json     PDF processing run statistics
+│   ├── qa_results_*.json            Saved batch QA session results
+│   ├── ragas_results.json           RAGAS evaluation output (STEP 14, timestamped)
+│   └── checkpoint_*.json            Intermediate checkpoints from PDF processing
 │
-├─ src/pdf_processor_commented.py    (800+ lines)
-│  └─ Educational version
-│  └─ Every line explained
-│  └─ Use for learning/understanding
+├── vector_db/                       Everything the online app downloads as one
+│   │                                 unit via snapshot_download — all 4 files
+│   │                                 below travel together through the same
+│   │                                 HF Dataset repo with zero extra app.py logic
+│   ├── chroma.sqlite3               ChromaDB index + metadata (main file)
+│   ├── *.bin                        HNSW graph binary files (fast ANN search)
+│   ├── bm25_index.pkl               BM25 keyword index for hybrid retrieval
+│   │                                 (Change 2 — built by build_vector_store.py,
+│   │                                 NOT a separate script)
+│   ├── gene_index.pkl               NCBI Gene + UniProt index, P. vulgaris only
+│   │                                 (Change 5 — built by build_gene_index.py)
+│   ├── trial_data.db                SQLite structured trial data, LLM-extracted
+│   │                                 from paper tables (Change 6 — built by
+│   │                                 extract_structured_data.py)
+│   └── database_statistics.json     Stats: chunk count, year ranges, sources
 │
-└─ src/test_processor.py             (200+ lines)
-   └─ Test suite
-   └─ Dependency checker
-   └─ Sample processing
-
-Scripts:
-├─ scripts/setup_pdf_processing.sh
-│  └─ Automated setup script
-│  └─ Interactive installation
+├── jobs/                            SLURM batch scripts for HPCC
+│   ├── process_pdfs.sb              sbatch: run pdf_processor.py
+│   ├── generate_embeddings.sb       sbatch: run generate_embeddings.py on GPU
+│   ├── build_vector_store.sb        sbatch: ChromaDB + BM25 index
+│   ├── build_gene_index.sb          sbatch: NCBI/UniProt gene index (Change 5,
+│   │                                 no GPU, needs network egress)
+│   ├── extract_structured_data.sb   sbatch: LLM trial-data extraction (Change 6,
+│   │                                 needs GPU + Ollama)
+│   ├── run_ollama_qa.sb             sbatch: batch QA via Ollama (routes +
+│   │                                 gene-validates automatically, Change 7)
+│   └── run_ragas_eval.sb            sbatch: RAGAS evaluation (Change 4, needs
+│                                     GPU + Ollama + a Gemini API key)
 │
-├─ scripts/analyze_and_copy_pdfs.sh
-│  └─ PDF analysis and organization
-│  └─ Progress tracking
+├── scripts/                         Utility shell scripts
+│   ├── analyze_and_copy_pdfs.sh     Find PDFs, copy to data/pdfs/
+│   ├── setup_pdf_processing.sh      Install PyPDF2, pytesseract etc.
+│   ├── setup_ollama.sh              Download and install Ollama
+│   ├── download_llama_model.sh      Pull llama3.1:8b via ollama pull
+│   ├── start_ollama.sh              Start Ollama server on a compute node
+│   └── test_ollama.sh               Sanity check: query local Ollama
 │
-├─ jobs/process_pdfs.sb
-│  └─ SLURM batch job script
-│  └─ 4-hour job, 8 CPUs, 32GB RAM
+├── config/
+│   └── HPCC_SETUP_GUIDE.md          Step-by-step HPCC first-time setup guide
 │
-└─ config/module_setup.sh
-   └─ HPCC module loading
-   └─ Environment verification
+├── logs/                            All SLURM and pipeline log files (NOT in git)
+├── models/                          Ollama model storage (NOT in git)
+│
+├── hf_dataset_upload/               Local clone of the HF Dataset repo
+│                                    (used to push vector_db/ to HF)
+│
+├── requirements.txt                 Python dependencies for HPCC environment —
+│                                    now includes rank-bm25 (Change 2) and a
+│                                    tightly-pinned ragas/langchain stack
+│                                    (Change 4, see STEP 23 for why)
+├── DOCUMENTATION_INDEX.txt          THIS FILE
+├── HYBRID_RAG_UPGRADE.md            Rewritten for Change 2's actual (automatic,
+│                                    RRF-based) hybrid system — the version you
+│                                    might remember describing --hybrid flags
+│                                    and data/bm25_index.json is gone
+├── README.md                        Project overview
+├── CODE_DOCUMENTATION.md            Auto-generated code reference (predates
+│                                    Changes 1-7 — treat as historical)
+├── PDF_ANALYSIS.md                  Statistics about the PDF collection
+├── QUICK_START.md                   5-minute setup guide
+├── EMBEDDING_QUICK_START.md         Embedding-specific quick start
+├── VECTOR_STORE_QUICK_START.md      ChromaDB quick start
+├── README_EMBEDDINGS.md             Embeddings detailed reference
+├── README_VECTOR_STORE.md           ChromaDB detailed reference
+├── README_PDF_PROCESSOR.md          PDF processor detailed reference
+├── README_OLLAMA.md                 Ollama local LLM reference
+└── OLLAMA_QUICK_START.md            Ollama 5-minute guide
+
 
 ================================================================================
-📊 OUTPUT DOCUMENTATION
+4. STEP 1 — HPCC ENVIRONMENT SETUP
 ================================================================================
 
-What the processor creates:
+CONCEPT: What is HPCC?
+  HPCC = High Performance Computing Cluster at MSU. It is a large shared
+  computer system with many GPU-equipped nodes. We use it because:
+    - Generating embeddings for 21,876 chunks needs a GPU (would take hours on CPU)
+    - The PDFs are stored at /mnt/research/BeanLab/ which is only accessible
+      from within HPCC
 
-1. data/processed_chunks.json
-   └─ Main output: 15,000-20,000 chunks
-   └─ Format: [{text, source_file, year_range, chunk_id, page, tokens}, ...]
+CONDA ENVIRONMENT
+  We created an isolated Python environment called "bean_llm" using Conda so
+  that we can install exact package versions without affecting other users:
 
-2. data/processing_metadata.json
-   └─ Statistics and configuration
-   └─ Success/failure counts
-   └─ Processing timestamp
+    conda create -n bean_llm python=3.11
+    conda activate bean_llm
 
-3. data/checkpoint_N.json
-   └─ Intermediate saves (every 50 PDFs)
-   └─ For recovery if crash occurs
+  The environment is stored at:
+    /mnt/scratch/kodumuru/conda/envs/bean_llm/
 
-4. logs/processing.log
-   └─ Detailed processing log
-   └─ INFO/WARNING/ERROR messages
+  All SLURM job scripts activate it with:
+    CONDA_BASE="/mnt/scratch/kodumuru/conda"
+    source "${CONDA_BASE}/etc/profile.d/conda.sh"
+    conda activate bean_llm
 
-5. logs/pdf_processing_JOBID.{out,err}
-   └─ SLURM job output
-   └─ Standard output and errors
+  Key packages installed (see STEP 23 for the full, current list):
+    PyPDF2, pytesseract, pdf2image, tiktoken — PDF processing
+    sentence-transformers, torch, transformers — embeddings + cross-encoder
+    chromadb — vector database
+    rank-bm25 — keyword search (Change 2)
+    ragas, langchain-community, langchain-google-genai — RAGAS evaluation
+      (Change 4 — tightly pinned, see STEP 23, this combination is fragile)
+    tqdm, numpy — utilities
 
-================================================================================
-🎯 QUICK REFERENCE BY TASK
-================================================================================
+  CRITICAL BUG FIX: transformers vs huggingface-hub conflict
+    sentence-transformers depends on transformers. After initially installing
+    huggingface-hub>=0.24 (needed for snapshot_download), transformers threw
+    an incompatibility error because the old version required huggingface-hub<0.24.
+    Fix: upgrade transformers to >=4.46.0 which is compatible:
+      conda run -n bean_llm pip install "transformers>=4.46.0"
 
-TASK: I want to get started quickly
-READ: QUICK_START.md
-RUN:  bash scripts/setup_pdf_processing.sh
+MODULES
+  HPCC uses the "module" system to load system-level libraries:
+    module purge                    — clear any conflicting modules
+    module load CUDA/12.1.1         — GPU driver bindings for PyTorch
+    module load git-lfs/3.5.1       — needed to push large files to HF
+    module load Ollama/0.15.5       — needed for any job that runs local LLM
+                                       inference (qa_with_ollama.py,
+                                       extract_structured_data.py, eval_ragas.py)
 
-TASK: I want to understand the code
-READ: CODE_DOCUMENTATION.md
-      src/pdf_processor_commented.py
+  Note: we do NOT load a Python module because we use conda's Python instead.
 
-TASK: I need to set up HPCC environment
-READ: config/HPCC_SETUP_GUIDE.md
-RUN:  config/module_setup.sh
+COMPUTE NODES
+  Interactive development:
+    ssh dev-amd20-v100              — gives a shell on a node with a V100 GPU
 
-TASK: I want to test before full run
-READ: README_PDF_PROCESSOR.md (Testing section)
-RUN:  python3 src/test_processor.py
+  Batch jobs (see STEP 22 for the full current list):
+    sbatch jobs/generate_embeddings.sb
+    sbatch jobs/build_vector_store.sb
+    squeue -u $USER                 — check job status
 
-TASK: I need to submit SLURM job
-READ: README_PDF_PROCESSOR.md (SLURM section)
-RUN:  sbatch jobs/process_pdfs.sb
+  Node used for GPU work: dev-amd20-v100 (Tesla V100S 32GB VRAM)
 
-TASK: I want to customize processing
-READ: README_PDF_PROCESSOR.md (Configuration section)
-EDIT: jobs/process_pdfs.sb or use command-line args
-
-TASK: Something went wrong
-READ: README_PDF_PROCESSOR.md (Troubleshooting section)
-      CODE_DOCUMENTATION.md (Error Handling section)
-CHECK: logs/processing.log
-
-TASK: I want to analyze the PDF dataset
-READ: PDF_ANALYSIS.md
-RUN:  bash scripts/analyze_and_copy_pdfs.sh
-
-================================================================================
-📋 DOCUMENTATION BY FILE TYPE
-================================================================================
-
-Markdown Documentation (.md files):
-├─ README.md                         - Main index (START HERE)
-├─ QUICK_START.md                    - 5-minute quick start
-├─ README_PDF_PROCESSOR.md           - Complete user guide
-├─ CODE_DOCUMENTATION.md             - Developer documentation
-├─ PDF_ANALYSIS.md                   - Dataset analysis
-└─ config/HPCC_SETUP_GUIDE.md        - HPCC setup guide
-
-Python Code (.py files):
-├─ src/pdf_processor.py              - Production code
-├─ src/pdf_processor_commented.py    - Educational code
-└─ src/test_processor.py             - Test suite
-
-Shell Scripts (.sh files):
-├─ scripts/setup_pdf_processing.sh   - Setup automation
-├─ scripts/analyze_and_copy_pdfs.sh  - PDF organization
-└─ config/module_setup.sh            - Module loading
-
-SLURM Scripts (.sb files):
-└─ jobs/process_pdfs.sb              - Batch processing
-
-Configuration Files:
-└─ requirements.txt                  - Python dependencies
 
 ================================================================================
-🎓 LEARNING PATHS
+5. STEP 2 — PDF COLLECTION & ORGANISATION
 ================================================================================
 
-Path 1: Complete Beginner
-1. README.md (overview)
-2. QUICK_START.md (setup)
-3. Run: bash scripts/setup_pdf_processing.sh
-4. Run: python3 src/test_processor.py
-5. README_PDF_PROCESSOR.md (learn features)
-6. Run: sbatch jobs/process_pdfs.sb
+CONCEPT: What are the source files?
+  The Bean Lab collected 1,067 peer-reviewed research papers as PDFs over
+  65 years (1961–2026). They are organised in subdirectories by year range:
+    /mnt/research/BeanLab/Parimal/pdfs/1961-2006/
+    /mnt/research/BeanLab/Parimal/pdfs/2007-2026/
 
-Path 2: Developer
-1. README.md (overview)
-2. CODE_DOCUMENTATION.md (architecture)
-3. src/pdf_processor_commented.py (code review)
-4. Modify configuration as needed
-5. Test changes
-6. Deploy to production
+  The filenames are DOI-encoded, e.g.:
+    10.2135_cropsci2004.1799.pdf
+  This means DOI = 10.2135/cropsci2004.1799
+  The slash (/) in the DOI is replaced by underscore (_) to make a valid filename.
+  This design allows us to reconstruct the exact DOI from the filename, which is
+  used for citations in answers.
 
-Path 3: HPCC User
-1. config/HPCC_SETUP_GUIDE.md (environment)
-2. Load modules or activate conda
-3. QUICK_START.md (setup)
-4. Submit SLURM job
-5. Monitor with squeue and logs
+PDF COPYING SCRIPT
+  scripts/analyze_and_copy_pdfs.sh walks the source directories using os.walk
+  with followlinks=True (important for symlinked directories on HPCC research
+  storage) and copies all .pdf files to data/pdfs/.
 
-Path 4: Researcher
-1. PDF_ANALYSIS.md (understand dataset)
-2. README_PDF_PROCESSOR.md (features)
-3. Process PDFs
-4. Analyze output chunks
-5. Build QA system on top
+DATA SIZE
+  ~1,067 PDFs → ~21,876 text chunks after processing
+  ~1 GB vector database (~875 MB before the bge-large-en-v1.5 upgrade — see
+  STEP 4 and ERROR 11)
 
-================================================================================
-📊 DATASET INFORMATION
-================================================================================
+NOTE ON STRUCTURED TRIAL DATA (Change 6): the Bean Lab does not currently
+  have a standardized spreadsheet/database of trial data (yield, disease
+  scoring, variety performance by location/year) — this was checked directly
+  against the shared BeanLab filesystem, not assumed. STEP 16 describes the
+  fallback: extracting structured data from these same 1,067 papers'
+  table chunks via LLM, which is a fundamentally lower-confidence approach
+  than querying a real lab spreadsheet would be. If real trial data ever
+  becomes available, structured_data.py's query interface would not need to
+  change — only the build step feeding vector_db/trial_data.db would.
 
-Location:  /mnt/research/BeanLab/Parimal/BEAN_LLM/Data/Data/
-Organized: 1961-2006/ (964 PDFs)
-           2007-2026/ (103 PDFs)
-Total:     1,067 PDFs
-Size:      ~347 MB
-Subject:   Agricultural/bean research papers
-Format:    PDF (DOI-based filenames)
-
-After Processing:
-Chunks:    15,000-20,000 (estimated)
-Size:      ~200-500 MB JSON
-Format:    Structured with metadata
 
 ================================================================================
-⚡ PERFORMANCE EXPECTATIONS
+6. STEP 3 — PDF PROCESSING PIPELINE  (src/pdf_processor.py)
 ================================================================================
 
-Processing Time:
-├─ Without OCR: 1-2 hours for 1,067 PDFs
-└─ With OCR:    6-10 hours for 1,067 PDFs
+CONCEPT: Why do we need to process PDFs?
+  LLMs have a context window limit (how much text they can read at once). We
+  cannot feed an entire 20-page paper into an LLM. Instead, we split every
+  paper into small "chunks" of ~512 tokens (about 350 words each). Each chunk
+  gets metadata tags (which paper it came from, which page, which section).
+  Later, we only retrieve the top few chunks for a given question.
 
-Resource Usage:
-├─ CPUs:   8 cores
-├─ Memory: 32 GB
-├─ Disk:   500 MB for output
-└─ Time:   4 hours SLURM limit
+FILE: src/pdf_processor.py
+CLASS: PDFProcessor
 
-Speed:
-├─ Without OCR: ~5-10 PDFs/minute
-└─ With OCR:    ~1-2 PDFs/minute
+CONSTRUCTOR PARAMETERS:
+  input_dir      — folder containing all PDFs (data/pdfs/)
+  output_file    — where to save chunks (data/processed_chunks.json)
+  log_file       — log file path
+  chunk_size     — 512 tokens per chunk (roughly 350 words)
+  chunk_overlap  — 128 tokens overlap between consecutive chunks (v2 upgrade)
+  use_ocr        — True to enable OCR for scanned PDFs
 
-================================================================================
-🔧 CUSTOMIZATION GUIDE
-================================================================================
+--- TEXT EXTRACTION ---
+  Method: extract_text_from_pdf()
+  Uses PyPDF2.PdfReader to read each page.
+  For each page, calls page.extract_text() which uses the PDF's embedded text
+  layer (fast, no GPU needed).
+  If a page has fewer than 50 characters of text AND use_ocr=True, it falls
+  back to OCR using pytesseract (Tesseract OCR engine) on a 300 DPI image of
+  that page. This handles scanned papers that have no embedded text.
+  Each page's text is prefixed with "[PAGE N]" so we can track page numbers.
 
-Want to change chunk size?
-└─ Edit: --chunk-size parameter (default: 512)
-└─ Effect: Larger = fewer chunks, more context
-           Smaller = more chunks, more precise
+--- SECTION DETECTION (v2 upgrade) ---
+  CONCEPT: Scientific papers have standard sections: Abstract, Introduction,
+  Methods, Results, Discussion, Conclusion. If we know which section a chunk
+  comes from, the retriever can weight results/methods chunks differently
+  from introduction chunks. The section name is stored in each chunk's metadata.
 
-Want to change overlap?
-└─ Edit: --chunk-overlap parameter (default: 50)
-└─ Effect: Larger = more context continuity
-           Smaller = more independent chunks
+  Implementation (pdf_processor.py:47-70):
+    SECTION_PATTERNS — a list of (name, regex) tuples matching common headers:
+      ("abstract",      r"^\s*(abstract)\s*$")
+      ("introduction",  r"^\s*(introduction|background)\s*$")
+      ("methods",       r"^\s*(materials?\s+and\s+methods?|...)\s*$")
+      ("results",       r"^\s*(results?(\s+and\s+discussion)?)\s*$")
+      ("discussion",    r"^\s*(discussion)\s*$")
+      ("conclusion",    r"^\s*(conclusions?|summary)\s*$")
+      ("references",    r"^\s*(references?|bibliography|...)\s*$")
 
-Want to enable OCR?
-└─ Add: --use-ocr flag
-└─ Warning: 10x slower!
+  _COMPILED_SECTION_PATTERNS compiles these with re.IGNORECASE for speed.
+  detect_section(line) checks each line against patterns and returns the
+  section name if it matches, or None if it is body text.
+  The current section is tracked across the whole document — when a new section
+  header is found, the current chunk is flushed and the section label changes.
+  Every chunk gets a "section" field with the label (e.g. "results").
 
-Want to process subset?
-└─ Edit: --input-dir to point to subset directory
+--- TABLE DETECTION AND PRESERVATION (v2 upgrade) ---
+  CONCEPT: Scientific papers contain tables with yield data, treatment comparisons
+  etc. If we split a table mid-row, the LLM cannot read it. We detect table rows
+  and keep the entire table as one chunk. This is also what makes Change 6's
+  structured-data extraction (STEP 16) possible at all — it re-uses this exact
+  same heuristic to find candidate chunks to extract numbers from.
 
-Want more frequent checkpoints?
-└─ Edit: --batch-size parameter (default: 50)
-└─ Effect: More checkpoints = safer but slower
+  is_table_row(line) — returns True if the line contains "|" (markdown-style
+    table) OR has 3+ consecutive spaces between tokens (PDF column alignment).
 
-================================================================================
-🐛 COMMON ISSUES & SOLUTIONS
-================================================================================
+  group_table_blocks(lines) — scans all lines on a page and groups consecutive
+    table rows into {"type":"table", "content": joined_rows} blocks.
+    Non-table lines become {"type":"text", "content": single_line} blocks.
 
-Issue: "No PDFs found"
-├─ Check: data/pdfs/ directory exists
-├─ Check: PDFs are linked or copied
-└─ Solution: Run scripts/analyze_and_copy_pdfs.sh
+  In chunk_text(), when a table block is encountered:
+    1. The current text chunk is flushed first (so the table is not mixed in)
+    2. The entire table is stored as a single chunk (even if > 512 tokens)
+    3. No overlap is added after tables (they are self-contained)
 
-Issue: "ImportError: No module named 'PyPDF2'"
-├─ Check: Conda environment activated
-└─ Solution: pip install -r requirements.txt
+  KNOWN GAP THIS CREATES (see STEP 16): a table's caption — which usually
+  states the location/year/study the numbers belong to — is text, so it ends
+  up in a DIFFERENT chunk than the table itself. Change 6's extraction script
+  works around this by also feeding the immediately-neighboring chunks to the
+  LLM as context, but this chunk-boundary split is the root reason table
+  extraction needs that workaround at all.
 
-Issue: "Permission denied"
-├─ Check: File permissions (ls -la)
-└─ Solution: chmod +x scripts/*.sh
+--- TOKEN-BASED CHUNKING ---
+  CONCEPT: We count tokens (not characters) because LLMs measure context in
+  tokens. One token ≈ 4 characters on average, but varies. We use tiktoken
+  (OpenAI's tokenizer, cl100k_base encoding) for exact token counts.
 
-Issue: "Out of memory"
-├─ Check: SLURM memory allocation
-└─ Solution: Increase --mem in jobs/process_pdfs.sb
+  count_tokens(text) — uses tiktoken if available, else falls back to len/4.
 
-Issue: "Job timeout"
-├─ Check: Time limit in SLURM script
-└─ Solution: Increase --time in jobs/process_pdfs.sb
+  chunk_text() algorithm (pdf_processor.py:321-438):
+    1. Split full text by [PAGE N] markers to track page numbers
+    2. For each page, split into lines
+    3. group_table_blocks() processes lines into text/table blocks
+    4. For text blocks:
+       a. Split sentences by .!? punctuation
+       b. Check each sentence for section headers via detect_section()
+       c. Accumulate sentences into current_chunk
+       d. When current_chunk tokens + new sentence tokens > chunk_size:
+          → flush the current chunk to the output list
+          → carry the last 128 tokens forward as overlap into the next chunk
+             (This is the _get_overlap_text() method)
+    5. Table blocks always flush current chunk first, then emit table as-is
 
-================================================================================
-📞 GETTING HELP
-================================================================================
+  OVERLAP CONCEPT (v2 upgrade, was 50 tokens in v1, now 128):
+    Overlap ensures that a sentence which falls across a chunk boundary can
+    still be found by queries that match either its beginning or its end.
+    Example: "The mean yield of 2.4 t/ha observed under drought conditions..."
+    If this sentence is split, both the chunk ending with it and the chunk
+    starting with it contain the crucial phrase "yield of 2.4 t/ha".
 
-Step 1: Check Documentation
-└─ Search this index for relevant file
-└─ Read documentation file
-└─ Try suggested solution
+--- CHECKPOINT SYSTEM ---
+  Every 50 PDFs, the accumulated chunks so far are written to:
+    data/checkpoint_{N}.json
+  This means if the SLURM job is killed at hour 3, we don't lose all work.
+  Files: data/checkpoint_50.json ... data/checkpoint_1050.json (21 files)
 
-Step 2: Check Logs
-└─ logs/processing.log (main log)
-└─ logs/pdf_processing_*.err (SLURM errors)
-└─ Look for ERROR or WARNING messages
+--- OUTPUT FORMAT ---
+  Each chunk is a Python dict saved to data/processed_chunks.json:
+  {
+    "text":        "The mean yield of 2.4 t/ha was observed...",
+    "source_file": "10.2135_cropsci2004.1799.pdf",
+    "year_range":  "1961-2006",
+    "chunk_id":    1234,
+    "page_number": 5,
+    "token_count": 487,
+    "section":     "results"
+  }
 
-Step 3: Run Test
-└─ python3 src/test_processor.py
-└─ Check if dependencies are installed
-└─ Verify PDFs are accessible
+  Also saves data/processing_metadata.json with run statistics:
+    total_pdfs, successful, failed, total_chunks, total_pages, ocr_used
 
-Step 4: Debug
-└─ Try processing single PDF manually
-└─ Check with sample commands in docs
-└─ Verify HPCC environment is set up
+  IMPORTANT for later steps: chunk_id resets to 0 for every PDF (it's a
+  per-paper counter), so it is NOT a globally unique identifier. STEP 12
+  (hybrid retrieval) relies on this fact being understood — it uses
+  ChromaDB's own "chunk_{i}" id (i = row position across the WHOLE corpus)
+  instead, wherever a global identifier is needed.
 
-================================================================================
-✅ VERIFICATION CHECKLIST
-================================================================================
+FINAL RESULT: 21,876 chunks from 1,067 PDFs
 
-Before Processing:
-[ ] Read QUICK_START.md
-[ ] Dependencies installed (pip install -r requirements.txt)
-[ ] PDFs linked/copied to data/pdfs/
-[ ] Test passed (python3 src/test_processor.py)
-[ ] SLURM script reviewed (jobs/process_pdfs.sb)
-
-During Processing:
-[ ] Job submitted (sbatch jobs/process_pdfs.sb)
-[ ] Job running (squeue -u $USER)
-[ ] Logs monitored (tail -f logs/processing.log)
-[ ] Checkpoints saving (ls data/checkpoint_*.json)
-
-After Processing:
-[ ] Output exists (ls -lh data/processed_chunks.json)
-[ ] Metadata exists (ls -lh data/processing_metadata.json)
-[ ] Chunk count verified
-[ ] Sample chunks reviewed
-[ ] Logs checked for errors
-
-================================================================================
-🚀 NEXT STEPS AFTER PROCESSING
-================================================================================
-
-1. Verify Output
-   └─ Check file size and chunk count
-   └─ Review sample chunks
-   └─ Check metadata statistics
-
-2. Create Embeddings
-   └─ Use sentence-transformers
-   └─ Convert text chunks to vectors
-   └─ Save embeddings
-
-3. Set Up Vector Database
-   └─ ChromaDB or FAISS
-   └─ Index chunks by embeddings
-   └─ Enable semantic search
-
-4. Build QA System
-   └─ LangChain for orchestration
-   └─ LLM for answer generation
-   └─ Retrieval-augmented generation
-
-5. Deploy & Test
-   └─ Create query interface
-   └─ Test with sample questions
-   └─ Evaluate answer quality
 
 ================================================================================
-📚 EXTERNAL REFERENCES
+7. STEP 4 — EMBEDDING GENERATION  (src/generate_embeddings.py)
 ================================================================================
 
-Python Libraries:
-├─ PyPDF2:     https://pypdf2.readthedocs.io/
-├─ tiktoken:   https://github.com/openai/tiktoken
-├─ tqdm:       https://tqdm.github.io/
-└─ pytesseract: https://github.com/tesseract-ocr/tesseract
+CONCEPT: What is a vector embedding?
+  A sentence like "bean rust pustules on leaves" can be converted into a
+  1024-dimensional number array (a vector) by a neural network trained on
+  millions of sentences. Similar sentences produce similar vectors (close in
+  1024-dimensional space). This is the key to semantic search — two chunks that
+  discuss the same topic will have similar vectors even if they use different
+  words.
 
-MSU HPCC:
-└─ Documentation: https://docs.icer.msu.edu/
+FILE: src/generate_embeddings.py
+CLASS: EmbeddingGenerator
 
-LLM Frameworks:
-├─ LangChain:  https://python.langchain.com/
-├─ ChromaDB:   https://docs.trychroma.com/
-└─ FAISS:      https://github.com/facebookresearch/faiss
+EMBEDDING MODEL: BAAI/bge-large-en-v1.5  (upgraded from all-MiniLM-L6-v2 — see
+  ERROR 11 below for why the switch happened and what it broke)
+  - Produces 1024-dimensional vectors (was 384 with all-MiniLM-L6-v2)
+  - 335M parameters (was 22M) — scores 64.2% on MTEB retrieval vs. MiniLM's
+    56.3%, a large jump in retrieval quality since this is the single biggest
+    lever on answer quality in the whole system
+  - L2-normalized output: every vector has length = 1.0
+    This means cosine similarity = dot product, which is the fastest comparison
+  - ASYMMETRIC convention: BGE models are fine-tuned so that *queries* should be
+    prefixed with an instruction string, but *documents/passages* should not.
+    generate_embeddings.py embeds documents WITHOUT any prefix (correct — it
+    only ever embeds passages). The query-side prefix is applied later, in
+    retriever.py, at query time (see STEP 6 below).
+
+GPU PROCESSING (V100):
+  batch_size=16 means 16 chunks are embedded in one GPU forward pass
+  (reduced from 32 — bge-large-en-v1.5 is ~15x larger than all-MiniLM-L6-v2,
+  so a smaller batch keeps it comfortably inside V100 VRAM).
+
+  Timing: ~21,876 chunks ≈ 3–5 minutes total on a V100 (was ~45 seconds with
+  the old MiniLM model — bge-large-en-v1.5 is much slower per-chunk, but this
+  only runs once per corpus rebuild, not per query).
+
+PIPELINE (generate_embeddings.py:620-661):
+  1. check_gpu()         — verify CUDA is available, log GPU name/memory
+  2. load_model()        — download BAAI/bge-large-en-v1.5 (auto-downloads once)
+  3. load_chunks()       — read data/processed_chunks.json
+  4. generate_embeddings() — batch encode all texts, returning numpy array
+  5. validate_embeddings() — check shape, no NaN/Inf, normalization, counts
+  6. save_embeddings()   — save as data/embeddings.npy + data/embeddings_metadata.json
+  7. print_statistics()  — log performance metrics
+
+VALIDATION CHECKS:
+  - Dimension check: every vector must be exactly 1024-dimensional
+  - NaN check: corrupted embeddings fail silently without this check
+  - Normalization check: vectors should have mean norm ≈ 1.0
+  - Count check: number of embeddings must equal number of chunks
+
+OUTPUT FILES:
+  data/embeddings.npy
+    Shape: (21876, 1024)  — float32 numpy array
+    Size: ~85 MB (was ~33 MB at 384-dim)
+
+  data/embeddings_metadata.json
+    Contains per-chunk metadata (source_file, page_number, section, etc.)
+    plus generation statistics (model, batch_size, GPU name, time, speed)
+
 
 ================================================================================
-📝 DOCUMENT VERSIONS
+8. STEP 5 — VECTOR STORE + BM25 INDEX BUILDING  (src/build_vector_store.py)
 ================================================================================
 
-All Documentation: Version 1.0
-Last Updated:      2026-03-21
-Author:            MSU HPCC Bean Lab
-Project:           LLM-Based Document QA System
+CONCEPT: What is ChromaDB?
+  ChromaDB is an open-source vector database. A vector database is like a
+  normal database except:
+    - Instead of searching by exact column values (name = "Smith"), you search
+      by similarity (find all vectors close to this query vector)
+    - ChromaDB uses HNSW (Hierarchical Navigable Small Worlds), a graph-based
+      algorithm that finds approximate nearest neighbours in milliseconds even
+      across 100,000 vectors — far faster than brute-force comparison
+
+  We use chromadb.PersistentClient which writes the database to disk
+  (vector_db/). This means we build it once on HPCC and then upload it to
+  HuggingFace Datasets for the web app to download.
+
+FILE: src/build_vector_store.py
+CLASS: VectorStoreBuilder
+
+COLLECTION NAME: "bean_research_docs"
+  A ChromaDB collection is like a table in a relational database.
+  All 21,876 chunks are stored in this single collection.
+
+DATABASE STRUCTURE:
+  Each document in ChromaDB stores three things:
+    id         — "chunk_0", "chunk_1", ..., "chunk_21875"  (this is the
+                 SAME global row position that STEP 12's BM25 index and RRF
+                 fusion use as their shared identifier — it's not just an
+                 internal ChromaDB detail, other code depends on it)
+    embedding  — 1024-dimensional float vector (from embeddings.npy)
+    document   — the raw chunk text (for displaying in answers)
+    metadata   — dict: {source_file, year_range, page_number, section, ...}
+
+BATCH INSERTION (batch_size=1000):
+  Inserting 21,876 vectors one at a time is slow. We insert 1,000 at a time
+  using collection.add(embeddings=..., documents=..., metadatas=..., ids=...).
+  This fills the collection in ~22 batches.
+
+METADATA FILTERING:
+  ChromaDB supports WHERE filters. We use this to let users filter by time
+  period:
+    collection.query(query_texts=[...], where={"year_range": "2007-2026"})
+  This returns only chunks from papers published in 2007-2026.
+
+BM25 INDEX BUILD (Change 2 — added directly to this script, not a separate
+  one, deliberately: both stores need to be built from the exact same
+  in-memory chunk list, in the same run, so their row ordering can never
+  drift apart):
+  build_bm25_index(metadata_list, texts) — tokenizes every chunk with the
+  SAME tokenize_bm25() function retriever.py uses at query time (they must
+  stay identical or BM25 scores become meaningless), builds a
+  rank_bm25.BM25Okapi index, and pickles {"bm25": ..., "metadata": [...]} to
+  vector_db/bm25_index.pkl. Soft-fails (logs a warning, continues) if
+  rank_bm25 isn't installed — BeanRetriever falls back to dense-only
+  automatically if this file doesn't exist (see STEP 12).
+
+PIPELINE (build_vector_store.py run(), current order):
+  1. load_data()             — load embeddings.npy + metadata + processed_chunks
+  2. create_database()       — create ChromaDB PersistentClient at vector_db/
+                               delete and recreate collection if it exists
+  3. add_to_database()       — insert all chunks in batches of 1000
+  4. analyze_metadata()      — count year_range distribution, unique sources
+  5. build_bm25_index()      — build and pickle vector_db/bm25_index.pkl (Change 2)
+  6. calculate_database_size() — measure disk usage (now includes bm25_index.pkl)
+  7. run_validation_queries() — test 4 query types to confirm DB works:
+       a. Semantic search: "bean breeding techniques"
+       b. Filtered search: "drought resistance" WHERE year_range='2007-2026'
+       c. Direct ID lookup: get chunk_0
+       d. Count check: collection.count() should equal total chunks
+
+     IMPORTANT: queries a. and b. embed the test query text locally via a
+     _embed_query() helper (BAAI/bge-large-en-v1.5, with the BGE query
+     instruction prefix) and pass query_embeddings= to collection.query().
+     They deliberately do NOT use collection.query(query_texts=...), because
+     that falls back to ChromaDB's own default embedding function — a
+     different, 384-dim model — which would raise a dimension mismatch against
+     our 1024-dim stored vectors. See ERROR 11 below.
+  8. save_statistics()       — write vector_db/database_statistics.json
+  9. print_statistics()      — log final summary
+
+OUTPUT:
+  vector_db/
+    chroma.sqlite3            — main index file (includes metadata + HNSW)
+    *.bin                     — binary HNSW graph files for fast ANN search
+    bm25_index.pkl            — BM25 keyword index (Change 2), ~few MB
+    database_statistics.json  — run stats
+
+  Database size: ~1 GB total (~875 MB before the bge-large-en-v1.5 upgrade —
+  the increase comes from storing 1024-dim vectors instead of 384-dim ones).
+  bm25_index.pkl and, if built separately, gene_index.pkl (STEP 15, ~8 MB in
+  a real run) and trial_data.db (STEP 16, size depends on corpus coverage)
+  are negligible additions on top of the ~1 GB ChromaDB store.
+
 
 ================================================================================
-💡 TIPS FOR SUCCESS
+9. STEP 6 — RETRIEVAL SYSTEM  (src/retriever.py + hf_space/retriever.py)
 ================================================================================
 
-1. Always test with small sample first
-2. Use SLURM for long-running jobs
-3. Monitor logs during processing
-4. Save checkpoints frequently
-5. Verify output before next step
-6. Read error messages carefully
-7. Check HPCC quota regularly
-8. Use scratch space for cache
-9. Document your modifications
-10. Ask for help when stuck
+CONCEPT: Multi-stage retrieval
+  Retrieval is how we find the most relevant chunks for a user's question.
+  As of Change 2 this is THREE stages, not two:
+    Stage 0 (Hybrid):  Query both ChromaDB (dense) and BM25 (keyword) in
+                       parallel, fuse the two ranked lists with Reciprocal
+                       Rank Fusion. See STEP 12 for the full mechanics —
+                       this section covers the dense side, which existed
+                       before Change 2 and is unchanged by it.
+    Stage 1 (Fast):    Ask ChromaDB for the 20 best matches via cosine similarity
+                       This is approximate but very fast (milliseconds)
+    Stage 2 (Precise): Re-score all fused candidates with a cross-encoder
+                       The cross-encoder reads the question AND each chunk
+                       together, giving a much more accurate relevance score
+    Result:            Keep only the top-k (6 for the Space, 10 for batch
+                       HPCC runs) chunks from the re-scored set
+
+FILE: src/retriever.py
+CLASS: BeanRetriever
+
+--- SCIENTIFIC SYNONYM EXPANSION ---
+  CONCEPT: Researchers use technical terminology. A user might type "rust"
+  but the papers say "Uromyces appendiculatus" or "bean rust" or "uredinia".
+  If we embed just the word "rust", the query vector won't fully match paper
+  text that only uses the Latin name. We fix this by augmenting the query.
+
+  SCIENTIFIC_SYNONYMS dict (retriever.py:23-81):
+    Maps 40+ common query terms to their scientific aliases:
+      "rust"     → ["bean rust", "Uromyces appendiculatus", "foliar rust", ...]
+      "drought"  → ["water deficit", "water stress", "soil water", ...]
+      "yield"    → ["seed yield", "grain yield", "pods per plant", ...]
+      "bean"     → ["common bean", "Phaseolus vulgaris", "navy bean", ...]
+      "bcmv"     → ["bean common mosaic virus", "BCMNV", "mosaic virus"]
+      "gwas"     → ["genome-wide association", "association mapping", ...]
+      ... (40+ entries total)
+
+  expand_query(query) (retriever.py:91-117):
+    Scans the user query for any synonym keys (case-insensitive).
+    For each match, appends up to 2 alias terms to the query string.
+    Caps at 6 extra terms total to avoid making the embedding too long.
+    Example:
+      Input:  "How does rust affect bean yield?"
+      Output: "How does rust affect bean yield? bean rust Uromyces appendiculatus
+               common bean Phaseolus vulgaris seed yield grain yield"
+    The augmented query is then embedded — the embedding vector now "points
+    toward" the scientific vocabulary used in the papers.
+
+    IMPORTANT (Change 2): this expanded string is used for DENSE retrieval
+    only. BM25 (STEP 12) deliberately gets the RAW, un-expanded query —
+    expanding "yield" to include "seed yield grain yield productivity..."
+    would make BM25 search for keywords unlikely to appear verbatim, which
+    defeats the point of exact keyword matching. The query router (STEP 17)
+    follows the same raw-vs-expanded principle when deciding what to send to
+    structured_data.py.
+
+--- CHROMADB QUERY ---
+  _chromadb_query() generates the query embedding locally using
+  SentenceTransformer.encode() with the SAME model used to index the chunks:
+  BAAI/bge-large-en-v1.5 (upgraded from all-MiniLM-L6-v2 — ERROR 11 below).
+  Then calls collection.query() with n_results=20.
+  Returns 20 chunk dicts with: text, source, doi, year_range, page, section,
+  distance (L2 distance in 1024-dim space, was 384-dim), rerank_score (None
+  at this point), bm25_score (None at this point — filled in only if the
+  hybrid fusion pass also finds this chunk, see STEP 12), and global_id (the
+  integer parsed from ChromaDB's own "chunk_{i}" document id — this is what
+  STEP 12's RRF fusion uses to tell whether a dense hit and a BM25 hit are
+  the same underlying chunk).
+
+  QUERY INSTRUCTION PREFIX: BGE models are fine-tuned asymmetrically — the
+  query side gets a fixed instruction prefix, the document side does not.
+  _chromadb_query() prepends BGE_QUERY_INSTRUCTION =
+  "Represent this sentence for searching relevant passages: " to the
+  (already synonym-expanded) query text before calling embedder.encode().
+  Documents were embedded in generate_embeddings.py WITHOUT this prefix.
+  Getting this backwards (or omitting it) doesn't crash anything — it just
+  quietly gives worse retrieval than bge-large-en-v1.5 is capable of, since
+  the model wasn't fine-tuned to treat query and passage text the same way.
+
+  QUERY EMBEDDER LAZY-LOADING: retrieve()/retrieve_candidates() are called
+  from several places (hf_space/app.py, deploy/app.py, qa_with_ollama.py,
+  interactive_qa.py, eval_qa.py, eval_ragas.py). Only the two app.py files
+  ever passed an explicit `embedder=` into BeanRetriever(); the rest
+  constructed BeanRetriever(collection) with no embedder at all. Before the
+  Change 1 embedding-model upgrade that was harmless (see ERROR 11 for the
+  full story) — ChromaDB's own default embedding function happened to also
+  be all-MiniLM-L6-v2. Fix: BeanRetriever now has a _load_embedder() method
+  that lazily loads BAAI/bge-large-en-v1.5 itself the first time a query
+  runs, if the caller didn't already supply one. Every caller above is fixed
+  by this one change — none of them needed to be edited individually.
+
+  DOI RECONSTRUCTION: _filename_to_doi(filename) converts stored filenames
+  back to DOIs:  "10.2135_cropsci2004.1799.pdf" → "10.2135/cropsci2004.1799"
+  This gives us the citation format used in answers. Also reused by
+  build_gene_index.py, build_vector_store.py, and extract_structured_data.py
+  wherever a source filename needs to become a citable DOI.
+
+--- HYBRID RETRIEVAL (Change 2) — see STEP 12 for the full mechanics ---
+  retrieve_candidates() now internally does: load BM25 index if present
+  (lazy, _load_bm25()) → get dense candidates as above → if BM25 available,
+  fuse via Reciprocal Rank Fusion (_hybrid_fuse()) → dedupe → return. If no
+  BM25 index is found, falls back to dense-only exactly as before Change 2.
+  This is fully automatic; no caller needs to know or request it.
+
+--- CROSS-ENCODER RERANKING ---
+  CONCEPT: The bi-encoder (bge-large-en-v1.5) embeds the question and chunks
+  separately and compares them in vector space. This misses subtle word
+  interactions.
+  A cross-encoder reads the question and chunk TOGETHER in one pass, so it
+  can understand phrases like "yield is NOT affected by rust at early stages" —
+  the bi-encoder would give this high similarity to "yield" and "rust" queries
+  even though the sentence says the opposite.
+
+  Cross-encoder model: cross-encoder/ms-marco-MiniLM-L-6-v2
+    - Trained on MS MARCO passage ranking dataset (Microsoft's search benchmark)
+    - Reads (question, passage) pairs and outputs a relevance score
+    - max_length=512 tokens
+    - Loaded lazily (_load_cross_encoder is called only when first needed)
+    - Unchanged by any of Changes 1-7 — it operates on raw text pairs, not
+      embeddings, so it doesn't care which retrieval channel found each
+      candidate or which embedding model produced the vectors
+
+  rerank(query, candidates, top_k=6):
+    Creates pairs: [(question, chunk1_text), (question, chunk2_text), ...]
+    Calls cross_encoder.predict(pairs) → returns a score for each pair
+    Sorts by score (descending) → returns top_k chunks
+    Falls back to distance-based ordering if cross-encoder unavailable
+
+--- DEDUPLICATION ---
+  _deduplicate(chunks): removes chunks with the same (source_file, page_number)
+  keeping the one with the lowest distance. Used for the dense-only fallback
+  path, where every candidate has a real distance to sort by.
+
+  _dedupe_keep_order(chunks): a second, order-preserving variant added in
+  Change 2 for the hybrid-fusion path — it keeps the first occurrence per
+  (source, page) rather than re-sorting by distance, because BM25-only
+  candidates have distance=None and can't be meaningfully sorted against
+  real distances. The candidates are already RRF-ranked by the time this
+  runs, so "first occurrence" already means "best fused rank."
+
+--- CONFIDENCE ASSESSMENT ---
+  assess_confidence(chunks) (retriever.py:134-157):
+  Examines the top chunks' distances to give a quality label:
+    SUPPORTED         — best_distance ≤ 0.45 AND ≥3 relevant chunks
+                        (very strong semantic match in the database)
+    PARTIALLY_SUPPORTED — best_distance ≤ 0.65 AND ≥2 relevant chunks
+    INFERRED          — best_distance ≤ 0.85 (moderate match)
+    UNSUPPORTED       — best_distance > 0.85 (weak match, still attempt answer)
+
+  Distance thresholds explained:
+    With L2-normalized embeddings, L2 distance and cosine similarity relate as:
+      cos_sim ≈ 1 - (dist² / 2)
+    So distance 0.45 ≈ cos_sim 0.90 (very strong match)
+    Distance 0.85 ≈ cos_sim 0.64 (moderate match)
+
+  The confidence label is passed to the prompt builder, which adds a note
+  for INFERRED/UNSUPPORTED questions telling the LLM that evidence may be weak.
+
+  NONE-DISTANCE SAFETY (Change 2): BM25-only chunks have distance=None.
+  assess_confidence() now has a small _dist() helper that treats None as
+  worst-case (1.0) instead of crashing the comparison — this bug and its
+  twins elsewhere are catalogued in ERROR 15.
+
+  ⚠ KNOWN FOLLOW-UP NEEDED (still not done as of Change 7): these four
+  threshold constants (0.45 / 0.65 / 0.85 / 1.10, also mirrored as
+  SIMILARITY_HARD_CUTOFF=1.20 in hf_space/retriever.py and
+  NO_MATCH_THRESHOLD=1.10 in hf_space/app.py and deploy/app.py) were
+  empirically tuned against all-MiniLM-L6-v2's distance distribution. A
+  different embedding model — especially one 15x larger and trained
+  differently, like bge-large-en-v1.5 — will very likely produce a different
+  distribution of L2 distances for the same corpus, so these exact cutoff
+  values may no longer separate "strong match" from "weak match" the way
+  they did before. Re-validate — e.g. by running eval_qa.py or eval_ragas.py
+  (STEP 14) and checking the confidence_distribution in the output, or by
+  manually inspecting distances for a few known-good vs. known-bad queries —
+  before trusting the SUPPORTED/PARTIALLY_SUPPORTED/INFERRED/UNSUPPORTED
+  labels at face value against the new vector store.
+
+FULL PIPELINE — retrieve(query, top_k=6, n_candidates=20):
+  1. expand_query(query)                              — dense side only
+  2. retrieve_candidates(expanded, n_candidates=20)    — ChromaDB top-20,
+                                                          fused with BM25 via
+                                                          RRF if available (STEP 12)
+  3. _deduplicate() or _dedupe_keep_order()            — depending on path
+  4. rerank(query, candidates, top_k=6)                — cross-encoder top-6
+  5. assess_confidence(ranked)
+  Returns: (chunks, confidence_label)
+
 
 ================================================================================
-🎯 ONE-LINE COMMAND REFERENCE
+10. STEP 7 — PROMPT ENGINEERING  (src/prompts.py + hf_space/prompts.py)
 ================================================================================
 
-Setup:
-  bash scripts/setup_pdf_processing.sh
+CONCEPT: What is prompt engineering?
+  The LLM receives a text prompt — this is our only way to control its behaviour.
+  Prompt engineering is the practice of writing prompts carefully to get the
+  exact output format, citation style, and reasoning approach we want.
 
-Test:
-  python3 src/test_processor.py
+FILE: src/prompts.py (kept identical to hf_space/prompts.py on every change)
 
-Process (interactive):
-  python3 src/pdf_processor.py
+--- SYSTEM PROMPT (SYSTEM_PROMPT variable) ---
+  The system prompt is sent at the start of every conversation and sets the
+  LLM's "persona" and rules. Our system prompt specifies:
 
-Process (SLURM):
+  WRITING STYLE rules:
+    - Write in flowing paragraphs (not bullet lists) by default
+    - Integrate citations naturally: "...yields of 2–3 t/ha under rainfed
+      conditions (doi:10.1234/example, p.4)"
+    - Use specific numbers, units, and percentages from the papers
+    - If multiple papers agree, synthesise into one clear statement
+    - If papers disagree, say so plainly in natural language
+    - Use subheadings only if they genuinely aid clarity for multi-part questions
+    - Use markdown tables ONLY when the question asks for comparison AND there
+      is enough actual data to fill the table meaningfully
+
+  TABLE RULES (strict):
+    - Only include a row if the source explicitly reports a value for it
+    - NEVER leave cells empty or write "not reported"
+    - Every data cell must have a real number from a source
+    - Keep tables small and accurate — 3 accurate rows > 8 rows with empty cells
+    - Always follow a table with a summary paragraph
+
+  CITATION RULES (strict):
+    - Cite ONLY using DOI format: (doi:10.XXXX/suffix, p.N)
+    - NEVER use [1], [2], [Source 1], [Document 2] — these are FORBIDDEN
+    - Only cite when it directly supports the specific claim in that sentence
+    - Sources marked "WEAK EVIDENCE" only cited when no stronger source exists
+
+  TRIAL DATA rules (added Change 7, when a TRIAL DATA section is present):
+    - Trial data rows are exact numbers for the specific cultivar/location/year
+      asked about — prefer them over paraphrasing a similar number from a
+      retrieved passage
+    - These rows were extracted automatically from paper tables and may
+      occasionally contain transcription errors (see STEP 16) — cite them the
+      same doi/page way as any other source so the user can check the original
+    - Use the literature sources to explain what the trial numbers mean and how
+      they compare to other findings — trial data gives precision, literature
+      gives interpretation
+
+  IMPORTANT behaviour:
+    - Never refuse to answer — give best answer from available sources
+    - If sources only partially address the question, answer what is possible
+    - Do NOT mention confidence labels or retrieval systems in the answer
+
+  WHY NO CONFIDENCE LABELS IN THE ANSWER:
+    Earlier versions showed labels like [SUPPORTED] or [INFERRED] in the answer
+    text. Users found this confusing ("wtf is this labels"). The confidence
+    assessment is still done internally (for routing and prompt notes) but is
+    never shown to users.
+
+--- SECTION TAGS ---
+  SECTION_TAG_MAP maps section names to display tags:
+    "results"     → "[RESULTS]"
+    "methods"     → "[METHODS]"
+    "discussion"  → "[DISCUSSION]"
+    etc.
+  These tags are prepended to each chunk in the context block sent to the LLM,
+  so the LLM knows whether evidence comes from a methods section vs. results.
+
+--- BUILD_CONTEXT() ---
+  build_context(chunks) formats the retrieved chunks into a numbered list:
+    [1] doi:10.2135/cropsci2004.1799 | p.5 | [RESULTS]
+    <chunk text here>
+
+    [2] doi:10.1007/s00122-020-03567-8 | p.3 | [METHODS]
+    <chunk text here>
+    ...
+  Chunks with distance > 0.85 get "⚠ WEAK EVIDENCE" appended to their header.
+  Since Change 2, distance may be None (BM25-only chunk) — treated as
+  worst-case (1.0) rather than crashing (see ERROR 15).
+
+--- BUILD_MESSAGES() ---
+  build_messages(question, chunks, confidence="", trial_data_block="")
+  assembles the full prompt:
+    [{"role": "system", "content": SYSTEM_PROMPT},
+     {"role": "user",   "content": "<trial_data_block>\n\nRETRIEVED SOURCES:
+                                     \n\n<context>\n\nQUESTION: ..."}]
+  For INFERRED/UNSUPPORTED confidence, adds a note to the user message:
+    "NOTE: The retrieved sources may only partially address this question.
+     Answer as fully as you can from the evidence, and briefly note any gaps."
+
+  trial_data_block (Change 7): a PRE-FORMATTED string — the caller is
+  expected to have already called structured_data.format_trial_results(rows)
+  and pass the resulting string in, or "" if the query router (STEP 17)
+  didn't activate structured data for this question. prompts.py deliberately
+  does not know the row schema; it only knows where to place the block
+  (before "RETRIEVED SOURCES:") so the LLM sees exact numbers distinctly from
+  paraphrased literature text.
+
+--- BUILD_OLLAMA_PROMPT() ---
+  Alternative for Ollama (local LLM) which uses llama3 instruct format with
+  special tokens: <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+  Takes the same trial_data_block parameter as build_messages(), placed the
+  same way (before RETRIEVED SOURCES).
+
+--- FORMAT_REFERENCES() ---
+  format_references(chunks) generates the reference list shown below the answer:
+    **References:**
+    • doi:10.2135/cropsci2004.1799
+    • doi:10.1007/s00122-020-03567-8 *(weak evidence)*
+  Deduplicates by DOI — each paper appears only once even if multiple chunks
+  from it were retrieved. Same None-distance safety fix as build_context().
+
+
+================================================================================
+11. STEP 8 — LOCAL QA TESTING ON HPCC  (src/qa_with_ollama.py)
+================================================================================
+
+CONCEPT: Why test locally before deploying?
+  Before deploying to the internet (HuggingFace Spaces), we test the QA system
+  on HPCC using Ollama — a tool that runs LLMs locally on our GPU.
+
+OLLAMA SETUP:
+  scripts/setup_ollama.sh downloads and installs Ollama to models/
+  scripts/download_llama_model.sh runs: ollama pull llama3.1:8b
+  scripts/start_ollama.sh starts the Ollama server: ollama serve
+  The server listens on localhost:11434
+
+  Model used: llama3.1:8b (Meta's Llama 3.1, 8 billion parameters)
+    Requires ~6GB VRAM — fits comfortably on the V100's 32GB
+
+INTERACTIVE QA:
+  python src/interactive_qa.py
+  Opens a command-line loop:
+    Question> How does drought affect bean yield?
+    ...answer with citations...
+    Question> /quit to exit, /help for commands (/year, /sources, /strict —
+              the old /hybrid command was removed in Change 2 since hybrid
+              retrieval is now automatic, not a toggle)
+
+WHAT ANSWER_QUESTION() DOES (rewritten for Change 7 — query routing):
+  1. query_router.route(question) → RoutingDecision: use_literature (~always
+     True), use_structured_data, run_gene_validation, plus the actual
+     matched cultivar/location/trait/year/gene entities (see STEP 17)
+  2. Literature retrieval (retriever.retrieve()) and structured-data lookup
+     (structured_data.query_trial_data(), if flagged) run CONCURRENTLY via
+     concurrent.futures.ThreadPoolExecutor — they're independent of each
+     other, so there's no reason to serialize them (both are individually
+     fast: SQLite is sub-millisecond, vector retrieval is sub-second, but
+     structuring the code this way keeps the independence explicit and
+     leaves room for real gains if either grows more expensive later)
+  3. If strict_evidence is set AND confidence is UNSUPPORTED AND no trial
+     data rows were found, short-circuit with "Insufficient evidence..." —
+     changed in Change 7 to check trial_rows first: structured data can carry
+     the answer even when literature-only confidence looks weak
+  4. build_ollama_prompt(question, chunks, confidence, trial_data_block=...)
+     → formatted prompt, trial data section included if activated
+  5. HTTP POST to localhost:11434/api/generate → answer text
+  6. Gene validation runs UNCONDITIONALLY on the answer (not gated by
+     run_gene_validation — see STEP 15/17 for why): extract_gene_mentions(answer)
+     → validate_genes(mentions) if any found
+  7. Return: {answer, confidence, routing, trial_data_rows, gene_checks,
+     sources, retrieval_time_s, generation_time_s}
+
+  eval_qa.py and eval_ragas.py both call this same function, so they inherit
+  routing, structured data, and gene validation automatically without any
+  changes of their own.
+
+
+================================================================================
+12. STEP 9 — EVALUATION BENCHMARK  (src/eval_qa.py + benchmark_questions.py)
+================================================================================
+
+CONCEPT: How do we know if the system is working well?
+  We need objective measures. eval_qa.py runs a fixed set of pre-written
+  questions with known expected answer elements (rubrics) and scores the
+  system's answers by keyword coverage. See STEP 14 for the LLM-judged RAGAS
+  metrics that supplement this coarse scoring.
+
+FILE: src/eval_qa.py (scoring logic)
+FILE: src/benchmark_questions.py (the question bank — Change 4, SHARED with
+  eval_ragas.py so the two evaluators never drift onto different question sets)
+
+75 BENCHMARK QUESTIONS in 7 categories (was 25 in 5 categories before Change 4):
+  1. Direct Lookup (10, IDs: DL-01 to DL-10)
+     Facts stated verbatim in a single paper.
+  2. Cross-Section Synthesis (10, IDs: CS-01 to CS-10)
+     Facts assembled from multiple papers/sections.
+  3. Inference / Cause-Effect (10, IDs: IN-01 to IN-10)
+     Answer follows logically but is not stated directly.
+  4. Critique / Limitations (10, IDs: CR-01 to CR-10)
+     Asks for limitations, gaps, or challenges.
+  5. Multi-Part Questions (10, IDs: MP-01 to MP-10)
+     Compound questions requiring multiple sub-answers.
+  6. Adversarial (10, IDs: AD-01 to AD-10) — NEW in Change 4. Fake gene IDs
+     (Phvul.011G999950), fake cultivars ("Sierra Crimson-9"), out-of-scope
+     topics phrased like bean questions (wholesale bean pricing, ornamental
+     gardening). The "correct" answer is honest uncertainty, not a confident
+     (necessarily fabricated) fact. This is exactly where RAGAS's faithfulness
+     metric (STEP 14) is more useful than keyword rubrics: a fabricated answer
+     about a fictional gene has near-zero faithfulness regardless of how
+     confident it sounds.
+  7. Multi-Hop Synthesis (15, IDs: MH-01 to MH-15) — NEW in Change 4. Require
+     synthesizing across 3+ distinct sub-topics/papers, deeper than
+     cross_section's typical 2-source asks.
+
+  IMPORTANT CAVEAT (documented in benchmark_questions.py itself): questions
+  DL-06 through MH-15 (everything beyond the original 25) were authored in
+  the same style/domain as the originals but NOT verified against actual
+  corpus content — they may turn out to be unanswerable from what's actually
+  indexed. ground_truth is None for every single question (needed for RAGAS's
+  context_recall, STEP 14) — this was a deliberate choice, not an oversight:
+  fabricating 75 reference answers without verified access to the papers
+  would produce evaluation numbers that look rigorous but rest on guesses.
+
+SCORING (score_answer function, src/eval_qa.py):
+  rubric_coverage — fraction of rubric keywords found in the answer text
+    (coarse heuristic: checks if any 3+ char non-stopword from each rubric item
+     appears in the answer)
+  has_doi_citation — True if answer contains "doi:10.XXXX" pattern
+  has_confidence_label — True if answer contains [SUPPORTED] etc. (should be
+    False in current version since we removed confidence labels from outputs)
+  retrieval_confidence — SUPPORTED/PARTIALLY_SUPPORTED/INFERRED/UNSUPPORTED
+  confidence_appropriate — NEW in Change 4: for adversarial questions only
+    (expect_low_confidence=True in benchmark_questions.py), whether the
+    system actually hedged (INFERRED/UNSUPPORTED) rather than confidently
+    answering about a fabricated gene/cultivar/out-of-scope topic. None for
+    every non-adversarial question.
+
+AGGREGATE REPORTING:
+  avg_rubric_coverage           — mean coverage across all questions
+  doi_citation_rate             — fraction of answers with at least one DOI
+  confidence_label_rate         — fraction incorrectly showing confidence labels
+  adversarial_appropriate_hedge_rate — NEW: fraction of adversarial questions
+    where the system appropriately expressed low confidence
+  by_category                   — average rubric coverage per category
+  confidence_distribution        — how many SUPPORTED/PARTIAL/INFERRED/UNSUPPORTED
+
+Output saved to data/eval_results.json (or --output path)
+
+⚠ PRE-Change-4 HISTORY (see ERROR 13): eval_qa.py's score_answer() called
+  re.findall()/re.search() but the module never imported the `re` module at
+  all. Every single run of this script, since it was first written, crashed
+  with NameError on the first scored question — meaning no automated
+  benchmark run had ever actually completed before this was found and fixed.
+  Any historical claim about this system's quality prior to Change 4 was
+  based on manual spot-checking, not this script's output.
+
+
+================================================================================
+13. STEP 10 — HUGGINGFACE SPACES DEPLOYMENT  (hf_space/)
+================================================================================
+
+CONCEPT: What is HuggingFace Spaces?
+  HuggingFace Spaces is a free cloud hosting platform for AI web applications.
+  It runs a Docker container with your Python files and serves the Gradio UI
+  to the internet. The free tier provides:
+    - 2 vCPU, 16 GB RAM (as of 2026)
+    - No persistent storage between restarts (everything in /tmp is wiped)
+    - Free forever for public spaces
+
+CONCEPT: What is Gradio?
+  Gradio is a Python library that creates web UI components with minimal code.
+  gr.Textbox, gr.Dropdown, gr.Button, gr.Markdown — these become interactive
+  HTML elements. The chat() generator function (a normal synchronous Python
+  generator, NOT `async def` — worth being explicit about this, since it's
+  easy to assume otherwise once ThreadPoolExecutor shows up in it, see below)
+  wires up the whole chat pipeline.
+
+--- DEPLOYMENT FILES ---
+
+hf_space/requirements.txt (Python packages HF installs at build time):
+  gradio==6.10.0                — exact version pinned for stability
+  chromadb>=1.5.0,<2.0.0        — vector database
+  sentence-transformers>=2.7.0  — embedding + cross-encoder models
+  huggingface-hub>=0.24.0       — snapshot_download for vector_db
+  requests>=2.31.0              — direct HTTP calls to LLM APIs
+  numpy>=1.24.0,<2.0.0          — pinned to <2.0.0 (chromadb incompatibility)
+  pyvis>=0.3.2                  — GraphRAG paper-network visualization
+  rank-bm25>=0.2.2              — hybrid retrieval (Change 2)
+
+  NOTE: gene_validator.py, structured_data.py, and query_router.py (Changes
+  5-7) add ZERO new pip dependencies — all three are pure standard library
+  (re, os, pickle, sqlite3, pathlib, dataclasses, concurrent.futures). Only
+  the offline build scripts (build_gene_index.py needs nothing extra either
+  — urllib.request is stdlib; extract_structured_data.py needs nothing extra
+  — requests was already a dependency) and eval_ragas.py (STEP 14, HPCC-only,
+  never deployed to the Space) pull in new packages.
+
+hf_space/app.py — main application file:
+  See sections below for detailed explanation
+
+hf_space/retriever.py — NOT identical to src/retriever.py (correction: this
+  was previously documented as an identical copy, but the two have diverged —
+  hf_space/retriever.py is a more advanced "production" version with
+  apply_access_control(), apply_metadata_filters(), apply_similarity_threshold(),
+  and check_prompt_injection() that src/retriever.py does not have. Both
+  copies received every retrieval upgrade since (embedding model, hybrid
+  RRF, None-distance fixes) independently, since each defines its own
+  BeanRetriever class — see ERROR 11 and ERROR 15.
+hf_space/prompts.py    — identical copy of src/prompts.py (kept in sync
+  through every change so far — re-diff before assuming this is still true
+  after any future prompts.py edit)
+hf_space/gene_validator.py — identical copy of src/gene_validator.py (Change 5)
+hf_space/structured_data.py — identical copy of src/structured_data.py (Change 6)
+hf_space/query_router.py    — identical copy of src/query_router.py (Change 7)
+
+--- APP.PY STARTUP SEQUENCE ---
+  When HF Spaces starts the container and runs app.py, the top-level code
+  (outside functions) executes immediately:
+
+  1. Load embedding model:
+     embedder = SentenceTransformer("BAAI/bge-large-en-v1.5")
+     (upgraded from "sentence-transformers/all-MiniLM-L6-v2" — see STEP 4 and
+     ERROR 11). This downloads ~1.3GB from HuggingFace Model Hub (cached after
+     first download; was ~90MB for MiniLM, so cold starts and any HF Space
+     ephemeral-storage wipes now cost more download time). Used to embed user
+     queries — and, via _search_communities(), the GraphRAG global-mode query
+     — at runtime.
+
+  2. Download vector database:
+     DB_PATH = snapshot_download(
+         repo_id="Parimalanath/bean-lab-vector-db",
+         repo_type="dataset",
+         local_dir="/tmp/vector_db",
+     )
+     snapshot_download is smart: it only downloads files that aren't already
+     in /tmp/vector_db. This pulls down EVERYTHING in the dataset repo —
+     chroma.sqlite3, bm25_index.pkl, gene_index.pkl, trial_data.db — as one
+     download; none of Changes 2/5/6 required any change to this call. This
+     is why we moved the vector_db OUT of the Space repo and into a separate
+     HF Dataset repo in the first place — see STEP 11 and ERROR 5.
+
+  3. Load ChromaDB, gene index, trial database, BM25 index — all via each
+     module's own lazy-loader (BeanRetriever._load_bm25(), gene_validator's
+     _load_index(), structured_data's _load_db()), each trying
+     /tmp/vector_db/<file> among its candidate paths. None of these block
+     each other or app.py startup — if any file is missing, that subsystem
+     silently degrades (dense-only retrieval, no gene verification, empty
+     structured-data results) rather than crashing the app.
+
+  4. Create retriever:
+     retriever = BeanRetriever(collection, embedder=embedder)
+     retriever._load_cross_encoder()   ← downloads ms-marco-MiniLM-L-6-v2
+
+--- QUERY ROUTING + PARALLEL RETRIEVAL (Change 7) ---
+  Inside chat()'s local-mode branch, immediately before retrieval:
+    decision = route(message)   ← rule-based, on the RAW current message,
+                                   not the conversation-augmented context_query
+                                   used for retrieval itself (see STEP 17)
+  Then literature retrieval and (if decision.use_structured_data) the
+  structured-data query run concurrently:
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        lit_future = executor.submit(retriever.retrieve, context_query, ...)
+        struct_future = executor.submit(query_trial_data, ...) if activated else None
+        chunks, confidence = lit_future.result()
+        trial_rows = struct_future.result() if struct_future else []
+  chat() is a plain synchronous generator (not async def) — ThreadPoolExecutor
+  is the right tool here specifically BECAUSE there's no async context to
+  plug into; both calls are I/O-bound (SQLite read, HTTP-backed ChromaDB
+  query) so threads give real concurrency despite the GIL.
+
+  The out-of-scope gate was also changed in Change 7: a question is only
+  rejected as "I couldn't find relevant papers" if BOTH literature retrieval
+  found nothing relevant (_out_of_scope(chunks)) AND no structured trial-data
+  rows were found. Before this, a narrow "yield of X in Y" question could be
+  rejected purely because no literature chunk happened to mention that exact
+  combination, even when trial_data.db had the exact answer.
+
+--- PER-USER RATE LIMITER ---
+  WHY: HF Spaces is public. If someone writes a script that sends 1000 requests
+  per minute, they could exhaust all LLM API quotas for everyone.
+
+  Implementation:
+    RATE_LIMIT_REQUESTS = 8     (max 8 questions)
+    RATE_LIMIT_WINDOW   = 60    (per 60 seconds)
+
+    _rate_lock = threading.Lock()
+    _user_log = {}  (session_hash → list of timestamps)
+
+  Why threading.Lock():
+    Gradio's ASGI server handles multiple users concurrently in different threads.
+    Without a lock, two threads could simultaneously read and modify
+    _user_log and corrupt the data (race condition).
+    threading.Lock() ensures only one thread touches the dict at a time.
+
+  Why session_hash and not IP address:
+    Multiple researchers at MSU may share the same IP (university NAT).
+    session_hash is unique per browser tab, so colleagues don't block each other.
+
+--- 4-TIER LLM WATERFALL ---
+  WHY: Free-tier AI APIs frequently return HTTP 429 (rate limited) or
+  HTTP 503 (server overloaded). If we rely on a single API, the app fails
+  constantly. By chaining 4 services, the probability that ALL fail at once
+  is extremely low. The user never sees an error in normal operation.
+
+  call_llm(messages) orchestrates the waterfall:
+
+  TIER 1: Gemini 2.0 Flash — _call_gemini()
+    Primary because Google gives 1,000,000 tokens/minute free. Also the
+    model used directly (bypassing the rest of the waterfall) for the
+    faithfulness check (STEP 13) and as the RAGAS judge LLM (STEP 14) — see
+    STEP 24 for why those two calls use Gemini specifically, not call_llm().
+    Uses direct requests.post() to:
+      https://generativelanguage.googleapis.com/v1beta/models/
+      gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}
+    temperature=0.1 makes answers more deterministic and factual.
+    Falls through to Tier 2 on HTTP 429, 500, or 503.
+
+  TIER 2a: Groq — Llama 3.3 70B — _call_groq(messages, GROQ_MODEL_PRIMARY)
+    Groq runs LLMs on LPUs (Language Processing Units) — specialized chips that
+    are much faster than GPUs for inference. Free tier: 6000 tokens/minute.
+    Falls through on HTTP 413 (request too large), 429, or 503.
+
+  TIER 2b: Groq — Mixtral 8x7B — _call_groq(messages, GROQ_MODEL_FALLBACK)
+    If the 70B model hits its per-minute limit, try the smaller Mixtral model.
+
+  TIER 3: OpenRouter Auto — _call_openrouter()
+    Dynamically picks the best available free model from its network.
+
+  TIER 4: Together AI — DeepSeek R1 — _call_together()
+    Last resort — if this fails too, the user sees an error message listing
+    all 4 failure reasons.
+
+  WHY WE USE requests.post() INSTEAD OF OPENAI SDK or GROQ SDK:
+    HuggingFace Spaces sets the environment variable OPENAI_BASE_URL to point
+    to their own paid inference router. The OpenAI SDK and Groq SDK both read
+    this variable and redirect ALL API calls to HF's router instead of the real
+    API. This caused HTTP 402 "Payment Required" errors.
+    By using raw requests.post() with hardcoded URLs, we completely bypass
+    this env var hijacking.
+
+--- FAITHFULNESS + GENE VERIFICATION (added to the answer pipeline) ---
+  See STEP 13 (_verify_faithfulness) and STEP 15 (_verify_gene_mentions) for
+  the full mechanics. In chat()'s local-mode branch, both run after the LLM
+  generates its answer and before the final answer is shown:
+    faithfulness_warning = _verify_faithfulness(chunks, answer)   — direct
+      Gemini call, appends a footer listing any UNSUPPORTED/CONTRADICTED
+      claims; never blocks the answer, soft-fails silently if it can't run
+    gene_footer = _verify_gene_mentions(answer)   — regex + dict lookup, no
+      LLM call, runs unconditionally regardless of the router's
+      run_gene_validation flag (see STEP 15/17 for why)
+    full_answer = f"{answer}{faithfulness_warning}{gene_footer}\n\n---\n{format_references(chunks)}"
+
+--- GRADIO UI ---
+  gr.Blocks(title="Bean Lab Research QA") with a streaming Chatbot, message
+  input, follow-up-question chips, and (in global/GraphRAG mode) a pyvis
+  paper-network graph. Step-by-step status messages ("Searching...",
+  "Retrieving relevant passages...", "Verifying answer...",
+  "Generating suggestions...") stream to the UI via yield as the pipeline
+  progresses — "Verifying answer..." (was "Verifying answer against
+  sources...") now covers both the faithfulness check and gene verification,
+  which happen back-to-back at that point.
+
+  demo.launch(ssr_mode=False)
+    ssr_mode=False is critical — SSR (server-side rendering) caused HF's health
+    check endpoint to hang, keeping the Space in "Building" state forever.
+
+--- API KEYS CONFIGURATION ---
+  Set in HuggingFace Space Settings → Variables and Secrets:
+    Googlegeminiapi    — Google Gemini API key (get from aistudio.google.com) —
+                         used for Tier 1 generation, the faithfulness check,
+                         and (on HPCC, not the Space) the RAGAS judge
+    groq               — Groq API key (get from console.groq.com)
+    OPENROUTER_API_KEY — OpenRouter key (get from openrouter.ai)
+    TOGETHER_API_KEY   — Together AI key (get from api.together.xyz)
+
+  Note: the names are case-sensitive and must match exactly what is in app.py:
+    GEMINI_API_KEY  = os.environ.get("Googlegeminiapi", "").strip()
+    GROQ_API_KEY    = os.environ.get("groq", "").strip()
+  The .strip() call is essential — HF sometimes injects a trailing newline
+  character into secret values, which would corrupt the API URL with %0A.
+
+
+================================================================================
+14. STEP 11 — HF DATASET REPO FOR THE VECTOR DB
+================================================================================
+
+CONCEPT: Why a separate Dataset repo?
+  The ChromaDB vector_db directory is ~1 GB (~875 MB before the
+  bge-large-en-v1.5 embedding-model upgrade), plus bm25_index.pkl,
+  gene_index.pkl (~8 MB), and trial_data.db (Changes 2, 5, 6) — all now
+  living in the same vector_db/ directory and pushed together. Git LFS
+  (Large File Storage) stores large files in HuggingFace's storage system
+  and only keeps a small pointer file in the git repo itself.
+
+  PROBLEM: Every time the HF Space restarts (which happens daily), git pulls
+  the latest Space code, which triggers Git LFS to re-download all of it.
+  This download happens INSIDE the Docker build process, before the app starts.
+  The build was taking 20+ minutes and sometimes timing out — hence the Space
+  staying in "Building" state for over a day.
+
+  SOLUTION: Move the vector_db OUT of the Space repo entirely. Store it in a
+  separate HF Dataset repo: Parimalanath/bean-lab-vector-db
+  At runtime, app.py calls snapshot_download() which:
+    - Downloads to /tmp/vector_db on first run
+    - Skips files already present on subsequent runs (smart caching)
+    - Does NOT block the Docker build process
+    - Runs as app startup code, not as part of the git pull
+    - Pulls chroma.sqlite3, bm25_index.pkl, gene_index.pkl, and trial_data.db
+      as ONE download — none of Changes 2/5/6 required touching this call
+
+HOW TO CREATE AND POPULATE THE DATASET REPO:
+
+  Step 1: Create the repo on HuggingFace
+    Go to: huggingface.co/new-dataset
+    Name: bean-lab-vector-db
+    Visibility: Public
+    Click "Create dataset"
+
+  Step 2: Push vector_db from HPCC
+    cd /mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa
+
+    git clone https://Parimalanath:YOUR_HF_TOKEN@huggingface.co/datasets/\
+      Parimalanath/bean-lab-vector-db hf_dataset_upload
+    cd hf_dataset_upload
+
+    cp -r ../vector_db/* .
+
+    module load git-lfs/3.5.1
+    git lfs install
+    git lfs track "*.sqlite3" "*.bin" "*.pkl" "*.db"
+    git add .gitattributes .
+    git commit -m "update bean lab vector database"
+    git push origin main
+
+  Step 3: Get your HF token
+    Go to: huggingface.co/settings/tokens
+    Create a token with "write" scope
+    Replace YOUR_HF_TOKEN in the clone command above
+    NEVER paste a real token into a script or job file that gets committed —
+    see ERROR 14 for exactly this mistake happening once already.
+
+  Step 4: Restart the Space
+    Go to Space Settings → Restart Space
+    app.py will now call snapshot_download successfully.
+
+VERIFICATION:
+  In the Space logs you should see:
+    Downloading vector database from HF Dataset...
+    ✓ ChromaDB loaded: 21876 chunks
+    ✓ BM25 index loaded (..., N docs) — hybrid retrieval ON
+    ✓ Gene index loaded (..., N genes, M symbols)
+    ✓ Structured trial data loaded (..., N records)
+  (the last three lines only appear once bm25_index.pkl / gene_index.pkl /
+  trial_data.db actually exist in the dataset repo — until then, those
+  subsystems log their "not found, degrading gracefully" message instead,
+  which is expected and not an error)
+
+
+================================================================================
+15. STEP 12 — HYBRID BM25 + RRF RETRIEVAL  (Change 2)
+================================================================================
+
+See HYBRID_RAG_UPGRADE.md for the full narrative version of this section —
+it was rewritten from scratch for Change 2 and is kept as the canonical
+"why hybrid retrieval works this way" document. Summary here for completeness:
+
+WHAT REPLACED WHAT:
+  An earlier, opt-in hybrid system (`--hybrid` flag, `data/bm25_index.json`,
+  `HybridBeanRetriever` class, `/hybrid on` CLI command, `src/bm25_index.py`,
+  `src/build_bm25_index.py`, `src/hybrid_retriever.py`,
+  `jobs/build_bm25_index.sb`, `jobs/run_ollama_qa_hybrid.sb`) was DELETED
+  entirely and replaced by what's described below. That old system was also
+  silently non-functional on HPCC the whole time it existed — it imported
+  functions from `retriever` that only existed in hf_space/retriever.py, not
+  src/retriever.py, and every call site swallowed that ImportError.
+
+HOW THE CURRENT SYSTEM WORKS:
+  1. BUILD (build_vector_store.py, STEP 5): tokenize every chunk with
+     tokenize_bm25() (lowercase, splits on hyphens, keeps dots inside
+     alphanumeric runs so gene IDs and decimals survive as one token), build
+     a rank_bm25.BM25Okapi index, pickle to vector_db/bm25_index.pkl
+     alongside chroma.sqlite3 — same script, same in-memory chunk list as
+     ChromaDB, so the two can never drift out of row-order sync.
+  2. QUERY (retriever.py, both copies): BeanRetriever._load_bm25() lazily
+     loads the pickle on first query (candidate paths: vector_db/bm25_index.pkl,
+     /tmp/vector_db/bm25_index.pkl, or $BEAN_BM25_INDEX). If not found,
+     silently falls back to dense-only — every caller gets this automatically,
+     no flag required.
+  3. FUSION: raw query → BM25.get_scores() → top-N by score. Expanded query
+     (expand_query()) → ChromaDB → top-N by distance. Reciprocal Rank Fusion:
+     rrf_score(doc) = Σ 1/(60 + rank) across whichever list(s) contain it.
+     The shared identifier across both lists is the integer parsed from
+     ChromaDB's "chunk_{i}" id (_parse_chroma_id()) — NOT the per-chunk
+     "chunk_id" metadata field, which resets to 0 for every PDF (see STEP 3)
+     and can't identify a chunk globally.
+  4. The fused, deduplicated (_dedupe_keep_order()) candidate list then goes
+     through the SAME cross-encoder reranking as always (STEP 6) — reranking
+     doesn't know or care which channel found each chunk.
+
+BUGS THIS SURFACED (full detail in ERROR 15): several places compared a
+  chunk's `distance` against a numeric threshold using `.get("distance", 1.0)`,
+  which returns None — not the default — when distance is explicitly None
+  (every BM25-only chunk). Fixed in assess_confidence(),
+  apply_similarity_threshold() (hf_space/retriever.py only — src/retriever.py
+  never had this function), build_context(), format_references(), and the
+  _out_of_scope() gate in both hf_space/app.py and deploy/app.py.
+
+DEPENDENCY: rank-bm25 (pure Python, no compiled deps) — in requirements.txt
+  and hf_space/requirements.txt.
+
+
+================================================================================
+16. STEP 13 — FAITHFULNESS VERIFICATION / SELF-RAG LITE  (Change 3)
+================================================================================
+
+CONCEPT: The system generates an answer and, until Change 3, simply trusted
+  it. Nothing checked whether the LLM actually stayed faithful to the
+  retrieved context — a second LLM call, done cheaply, can catch cases where
+  it didn't.
+
+FILE: hf_space/app.py (NOT deployed to deploy/app.py or the HPCC batch path
+  — this is specifically a Space-side feature; ask if you want it added
+  elsewhere)
+
+HOW IT WORKS: _verify_faithfulness(chunks, answer)
+  1. Builds a prompt: "Given these source passages: {build_context(chunks)}
+     ... And this generated answer: {answer} ... For each factual claim,
+     determine SUPPORTED / UNSUPPORTED / CONTRADICTED ... Return ONLY a JSON
+     object: {"claims": [{"text": ..., "verdict": ...}]}"
+  2. Calls _call_gemini() DIRECTLY — not the full 4-tier call_llm() waterfall.
+     Deliberate: this is a cheap secondary check, not worth spending the
+     scarcer Groq/OpenRouter/Together free-tier quota on if Gemini happens to
+     be down. If Gemini fails, the check is skipped silently (soft-fail) —
+     it must never block the user from seeing their primary answer.
+  3. Parses the response defensively: regex-extracts the first {...} JSON
+     object from the raw text (handles stray prose/markdown fences the LLM
+     might add), then json.loads(). Any parse failure → skip silently.
+  4. If any claim is UNSUPPORTED or CONTRADICTED, appends a warning footer:
+     "⚠️ Automated faithfulness check — the following claim(s) could not be
+     verified against the retrieved sources: - *Unsupported:* ..."
+
+WHY A FOOTER, NOT "STRIPPING" THE CLAIM (the original design allowed either):
+  The checker returns each claim as the LLM's OWN extraction/paraphrase of
+  text from the answer — it is NOT guaranteed to be a verbatim substring of
+  the answer. A naive answer.replace(claim_text, "") would frequently
+  silently no-op on paraphrased claims, giving false confidence that a
+  hallucination was removed when it wasn't. Appending a visible warning is
+  slower to read but can't silently fail the way string-surgery can.
+
+COST NOTE: the original estimate was ~500 tokens per check. Realistically,
+  TOP_K=6 chunks of context + the answer + the JSON claims list runs closer
+  to 1500-2200 tokens round-trip — still trivial against Gemini's 1M TPM
+  free tier, just a more honest number than the original estimate.
+
+INTEGRATION POINT: chat()'s local-mode branch, after the LLM generates
+  `answer` and before building `full_answer` — see STEP 10.
+
+
+================================================================================
+17. STEP 14 — RAGAS EVALUATION PIPELINE  (Change 4, src/eval_ragas.py)
+================================================================================
+
+CONCEPT: eval_qa.py's keyword-rubric scoring (STEP 9) is coarse — it can't
+  tell if an answer said the right thing in the wrong words, or the wrong
+  thing using the right keywords. RAGAS computes LLM-judged metrics instead.
+
+FILE: src/eval_ragas.py
+SHARES: src/benchmark_questions.py (same 75 questions as eval_qa.py, STEP 9)
+
+METRICS COMPUTED:
+  faithfulness              — does the answer only contain claims supported
+                              by the retrieved context? No ground truth needed.
+  answer_relevancy           — does the answer address the question? Needs
+                              embeddings but no ground truth.
+  context_precision_no_ref   — are the retrieved chunks actually relevant?
+                              Computed via RAGAS's LLMContextPrecisionWithoutReference,
+                              which uses the generated ANSWER as the relevance
+                              yardstick instead of a ground-truth reference.
+                              Runs on every question.
+  context_precision          — the reference-based variant of the above.
+  context_recall             — did retrieval capture everything needed?
+                              REQUIRES a ground_truth reference answer.
+
+  context_precision and context_recall are computed ONLY for questions with
+  a non-empty ground_truth in benchmark_questions.py — currently NONE (see
+  STEP 9's caveat: fabricating reference answers without verified corpus
+  access would produce numbers that look rigorous but rest on guesses).
+  Filling in even the 5 direct_lookup questions' ground_truth would unlock
+  meaningful context_recall on the category where it matters most.
+
+JUDGE MODEL: Gemini 2.0 Flash (free), via langchain_google_genai.ChatGoogleGenerativeAI
+  wrapped in ragas.llms.LangchainLLMWrapper. Embeddings for answer_relevancy
+  use the SAME model as the rest of the system (BAAI/bge-large-en-v1.5) via
+  langchain_community.embeddings.HuggingFaceEmbeddings, wrapped in
+  ragas.embeddings.LangchainEmbeddingsWrapper — avoids any OpenAI dependency.
+
+DEPENDENCY FRAGILITY (see STEP 23 for the exact pinned versions): ragas,
+  langchain-community, and langchain-google-genai have real, verified
+  version conflicts with each other outside a narrow compatible window —
+  confirmed by actually installing combinations in an isolated venv, not by
+  reading changelogs. ragas 0.2.x requires langchain-core<0.4; recent
+  langchain-google-genai releases require langchain-core>=1.0. The pinned
+  set (ragas==0.2.15, langchain-community==0.3.7, langchain-google-genai==2.0.11)
+  is the one actually verified to resolve and import together — don't bump
+  any of these three individually without re-checking.
+
+PIPELINE (eval_ragas.py main()):
+  1. Load the 75-question benchmark (optionally filtered by --categories,
+     capped by --limit for smoke testing)
+  2. For each question, call qa_with_ollama.answer_question() — the SAME
+     production pipeline (routing, hybrid retrieval, gene validation) that
+     batch QA and the interactive CLI use; nothing about the pipeline is
+     reimplemented here
+  3. Build a ragas.EvaluationDataset of SingleTurnSample objects
+     (user_input, retrieved_contexts, response, and reference= only for
+     questions with ground_truth)
+  4. Run ragas.evaluate() twice: once with the reference-free metrics over
+     ALL answered questions, once with the reference-based metrics over only
+     the (currently empty) ground_truth subset
+  5. Merge per-question, save to data/ragas_results.json with a timestamp,
+     aggregate scores, and by-category breakdowns
+
+USAGE:
+  export Googlegeminiapi=<your-gemini-api-key>
+  python3 src/eval_ragas.py \
+      --vector-db vector_db \
+      --output data/ragas_results.json \
+      --log-file logs/ragas_eval.log
+
+SCHEDULING "nightly or on every code change": there is no CI system in this
+  repository (no .github/workflows, not even confirmed as a git repo at the
+  project root) — running this on a schedule requires your own HPCC crontab
+  calling `sbatch jobs/run_ragas_eval.sb`, or a CI system set up separately.
+  Not something this codebase configures on its own.
+
+
+================================================================================
+18. STEP 15 — GENE/LOCUS VALIDATION  (Change 5, src/gene_validator.py)
+================================================================================
+
+CONCEPT: After the LLM generates an answer, check any gene/locus names it
+  mentions against real databases — catches a hallucinated gene name before
+  it reaches the user, the same spirit as the faithfulness check (STEP 13)
+  but specifically for gene nomenclature.
+
+FILES: src/gene_validator.py (extraction + validation), src/build_gene_index.py
+  (offline index builder), copied identically to hf_space/ for both.
+
+★ THE FINDING THAT SHAPED THIS DESIGN (verified directly against the live
+  NCBI and UniProt APIs before writing any code — not assumed): classical
+  bean genetics symbols — Co-1 through Co-14 (anthracnose resistance),
+  Phg-1 through Phg-4 (angular leaf spot), bc-1/bc-2/bc-3 (BCMV/BCMNV
+  resistance), fin/Ppd (growth habit/photoperiod) — are essentially ABSENT
+  from both NCBI Gene and UniProt for P. vulgaris. Concretely:
+  `Co-1[Gene Name] AND txid3885[Organism]` on NCBI returns 0 of 62,308+
+  P. vulgaris gene records; UniProt `gene:bc-3`, `gene:Fin` for
+  organism_id:3885 return 0 results; a full-text search for "anthracnose"
+  across all P. vulgaris NCBI gene records returns 0 hits. NCBI's P. vulgaris
+  gene set is almost entirely systematic genome-annotation identifiers
+  (LOC137819210, PHAVU_010G111100) — these databases don't catalog classical
+  linkage-mapped genetics nomenclature from breeding literature at all.
+  Flagging every mention of a real, decades-documented gene like Co-1 as
+  "not found — treat with caution" would be actively backwards: it implies
+  the SYSTEM is untrustworthy when the DATABASES just don't cover this
+  vocabulary. Hence the three-way (not two-way) labeling below.
+
+ALSO VERIFIED: NCBI does not store the Phytozome "Phvul.010G111100" dotted
+  format at all — it cross-references the same locus as "PHAVU_010G111100"
+  (dot removed, underscore inserted, no case change). gene_validator.py's
+  _normalize_phytozome_id() converts one to the other before lookup.
+
+THREE-WAY VALIDATION SOURCES:
+  1. NCBI Gene + UniProt (build_gene_index.py) — for systematic genome-model
+     IDs and protein/gene names that ARE catalogued. Verified end-to-end with
+     a real download: 1.5GB gene_info.gz streamed and filtered to taxid 3885
+     (34,174 records), UniProt's P. vulgaris subset via /stream (32,887
+     entries), pickled to an 8.4MB vector_db/gene_index.pkl.
+  2. CLASSICAL_GENE_SYMBOLS (a small, hand-curated allowlist in
+     gene_validator.py itself — Co-1..14, Phg-1..4, bc-1/2/3/u, I, Ur-3/4/5/
+     6/7/9/11/12/13, fin/Fin, Ppd) — labeled "classical_literature" in
+     results, explicitly NOT claimed to be independently verified the way an
+     NCBI/UniProt hit is. Documented as possibly incomplete; add entries as
+     gaps are found.
+  3. Neither → "not found", genuinely unverified.
+
+EXTRACTION PATTERNS (extract_gene_mentions(), favors precision over recall
+  deliberately — a missed mention costs nothing, a false one is misleading):
+  - Phvul.\d{3}G\d{5,6} / PHAVU_\d{3}G\d{5,6}g? — Phytozome/NCBI gene models
+  - Co-(1-14), Phg-(1-4), bc-(1-3), Ur-(3,4,5,6,7,9,11,12,13) — word-boundary
+    regex, case-insensitive
+  - Fin/fin/Ppd — ONLY counted if a biology keyword (gene, allele, locus,
+    QTL, resistance, determinate, photoperiod, etc.) appears within 60
+    characters — bare "P" and bare "I" (the BCMV "I" gene) are deliberately
+    never matched at all, even context-anchored, since single-letter symbols
+    are too ambiguous in free-flowing prose
+  - Generic markdown-emphasized tokens (*PvTFL1y*) — filtered by a shape
+    heuristic (must contain a digit, hyphen, or multiple internal capitals)
+    that excludes italicized species/genus names (*Phaseolus*, *vulgaris*)
+    and emphasized English words without needing an explicit denylist
+  - KNOWN AMBIGUITY HANDLED: "Co-1" collides with "Cobalt-1" in chemistry/
+    nutrient contexts. If "cobalt" appears within ~20 characters of a Co-N
+    match, it's excluded.
+
+INTEGRATION (hf_space/app.py, chat()'s local-mode branch): _verify_gene_mentions(answer)
+  runs UNCONDITIONALLY after the LLM generates its answer — NOT gated by the
+  query router's run_gene_validation flag (STEP 17). Reasoning: this check
+  is free (regex + dict lookup, no LLM/API call) and already self-limits to
+  whether the ANSWER mentions a gene at all. A query with zero genetics
+  vocabulary can still produce an answer that names a gene (e.g. discussing
+  disease resistance as a yield factor), and catching a hallucinated one
+  there matters just as much — gating on the query-side flag would silently
+  drop coverage for no cost savings. The router's flag is still logged as a
+  routing/analytics signal, just not used to skip this check.
+
+FOOTER FORMAT:
+  "🧬 Gene/locus mentions:
+   - Phvul.001G189200 — verified (NCBI 12345: <description>)
+   - Co-1 — known classical genetics symbol (Anthracnose resistance locus);
+     not independently cross-referenced in NCBI/UniProt
+   - PvDREB2A — not found in NCBI Gene/UniProt for P. vulgaris; treat with caution"
+
+BUILD: build_gene_index.py downloads gene_info.gz (~1.5GB, streams/filters
+  without loading fully into memory) + UniProt's P. vulgaris subset, builds
+  gene_id_map (gene_id → metadata) and symbol_map (lowercased symbol/synonym
+  → [gene_ids]), pickles to vector_db/gene_index.pkl. Zero new pip
+  dependencies (urllib.request is stdlib). See STEP 22 for the SLURM job —
+  no GPU needed, but does need outbound HTTPS network access; the job script
+  includes a login-node-download fallback path in its comments if compute
+  nodes block that.
+
+
+================================================================================
+19. STEP 16 — STRUCTURED TRIAL-DATA LAYER  (Change 6, src/structured_data.py)
+================================================================================
+
+CONCEPT: The Bean Lab does not have a standardized trial-data spreadsheet —
+  checked directly against the shared BeanLab filesystem (all lab members'
+  readable directories, filename patterns for csv/xlsx/xls/db/sqlite, and
+  yield/trial/variety/cultivar keywords) before concluding this, not assumed.
+  Nothing turned up. This layer is the fallback: extract structured numeric
+  trial data (yield, disease scores, agronomic traits) from the same 1,067
+  papers' table chunks, using an LLM, into a real queryable SQLite database.
+
+★ HONESTY BOUNDARY (stated directly in extract_structured_data.py's own
+  docstring so it travels with the code, not just in this doc): every row in
+  vector_db/trial_data.db is LLM-derived from noisy, whitespace-heuristic-
+  detected table blobs (pdf_processor.py's table detection, STEP 3), NOT a
+  real lab spreadsheet or a clean structured parse. It carries its own
+  extraction-error and hallucination risk and does NOT have the same
+  trustworthiness guarantee a real lab-maintained database would. Spot-check
+  a sample against source PDFs before relying on it.
+
+FILES:
+  src/extract_structured_data.py — offline: scans processed_chunks.json,
+    identifies candidates, calls Ollama to extract rows, writes to SQLite
+  src/structured_data.py — runtime: read-only query interface against the
+    SQLite database, copied identically to hf_space/
+
+CANDIDATE DETECTION (is_extraction_candidate(), favors RECALL over precision
+  — the opposite tradeoff from gene_validator's extraction, STEP 15 — since a
+  missed candidate silently loses real data, while an over-included one just
+  costs one wasted LLM call that returns an empty array):
+  - Table-shaped chunks: mirrors pdf_processor.py's own is_table_row()
+    heuristic (pipe chars or 3+ space gaps), since table chunks preserve
+    their original per-line layout intact through chunking
+  - OR: high digit density (>3%) + a trait keyword nearby (yield, kg/ha,
+    t/ha, disease severity, days to maturity, seed weight, etc.) — catches
+    numeric data given in prose ("cv. Rex yielded 2400 kg/ha at Elora in
+    2019") that isn't formatted as a table at all
+
+KNOWN CHUNKING GAP AND HOW IT'S WORKED AROUND: a table's caption — which
+  usually states the location/year/study — is text, so pdf_processor.py's
+  chunking (STEP 3) puts it in a DIFFERENT chunk than the table itself. For
+  each candidate, extract_structured_data.py sends the target chunk PLUS its
+  immediately-neighboring chunks (same source_file, adjacent chunk order) to
+  the LLM as context, with explicit instruction to extract data only from
+  the target passage but use the neighbors to resolve location/year/study
+  identification.
+
+EXTRACTION PROMPT RULES: only extract values explicitly stated (no
+  inferring/averaging/guessing); a value with no associated cultivar name is
+  dropped; "trait" is a short label (yield, disease_severity,
+  days_to_maturity, seed_weight, plant_height, protein_content); "unit" is
+  captured as written (kg/ha, t/ha, 1-9 scale, %, days); location/year may be
+  null if genuinely not stated anywhere in the passages provided.
+
+SQLITE SCHEMA (vector_db/trial_data.db, table trial_records):
+  id, cultivar, location, year, trait, value, unit, source_doi, source_page,
+  source_chunk_id, raw_context (first 2000 chars of the source chunk, for
+  manual auditing). Indexed on cultivar, location, year, trait.
+
+QUERY INTERFACE (structured_data.py):
+  query_trial_data(cultivar=, location=, year=, year_range=, trait=, limit=200)
+    — case-insensitive partial match (SQL LIKE) on string filters, since
+    LLM-extracted spelling won't always exactly match a user's query. ALL
+    filter values are bound as parameters (?), never string-formatted into
+    SQL, regardless of input — verified with a real SQL-injection string
+    against a real test database: 0 rows returned, table confirmed intact
+    afterward.
+  get_available_cultivars() / get_available_locations() / get_available_traits()
+    — distinct values, used by query_router.py (STEP 17) to check whether a
+    query's mentioned terms actually resolve to something in the database,
+    rather than a hardcoded (and inevitably false-triggering) keyword list.
+  format_trial_results(rows) — citation-style markdown formatter, mirroring
+    prompts.py's format_references(); the query router / answer pipeline
+    passes its output straight into build_messages()'s trial_data_block
+    parameter (STEP 7) without prompts.py needing to know the row schema.
+
+Lazy-loaded read-only connection, same candidate-path pattern as BM25 and
+  gene index: vector_db/trial_data.db, /tmp/vector_db/trial_data.db, or
+  $BEAN_TRIAL_DB — travels for free through the same HF Dataset repo once
+  pushed there (STEP 11).
+
+NOT BUILT in Change 6: the query router that decides WHEN to activate this
+  vs. literature-only — that's Change 7 (STEP 17).
+
+
+================================================================================
+20. STEP 17 — QUERY ROUTER  (Change 7, src/query_router.py)
+================================================================================
+
+CONCEPT: Before Change 7, every question took the same path: expand → hybrid
+  retrieve → rerank → LLM. After Changes 5 and 6 there are three subsystems
+  that need different handling: the vector database (literature), the
+  structured trial data (STEP 16), and the gene validator (STEP 15, a
+  post-generation check). The router decides which combination of these to
+  activate per question — as independent FLAGS, not a single mutually-
+  exclusive category (unlike a design that picks one bucket: genetics OR
+  bean_data OR climate) — because a question like "What is the yield of navy
+  beans with Co-1 resistance in Michigan trials?" is simultaneously a
+  literature question, a structured-data question, and a genetics question,
+  and needs all three active at once.
+
+FILE: src/query_router.py, copied identically to hf_space/. Imported by
+  qa_with_ollama.py (and therefore eval_qa.py, eval_ragas.py automatically)
+  and hf_space/app.py — one shared module rather than copy-pasting routing
+  logic into each surface, avoiding the same drift risk that already bit
+  this project once (hf_space/retriever.py vs. src/retriever.py, ERROR 11).
+
+DESIGN: rule-based only, no LLM classifier call. Unlike a GPT-4o-classifier-
+  per-query design, this costs nothing extra on the 80%+ of questions that
+  are plain literature queries. An LLM disambiguation fallback for
+  "ambiguous cases" was considered but NOT implemented — "ambiguous" was
+  never given a crisp trigger condition, and a query matching none of the
+  rules already has a safe, well-defined default (use_literature stays True,
+  the other two stay False). route()'s signature leaves room to add this
+  later without changing callers.
+
+RoutingDecision dataclass (richer than plain booleans, deliberately):
+  use_literature (~always True), use_structured_data, run_gene_validation,
+  PLUS the actual matched entities: detected_cultivars, detected_locations,
+  detected_traits, detected_genes, detected_year, detected_year_range.
+  Necessary, not just nice-to-have: query_trial_data(cultivar="Rex",
+  location="Elora", year=2019) needs those actual values — a bare boolean
+  flag would force re-parsing the query a second time downstream to recover
+  the same information, wastefully and fragilely.
+
+DETECTION STRATEGY:
+  - Gene mentions: reuse gene_validator.extract_gene_mentions() DIRECTLY —
+    not reimplemented here, so the hardened patterns (including the
+    Cobalt-1/Co-1 negative-context guard, STEP 15) can't drift out of sync
+    between two copies. Plus a separate _GENETICS_KEYWORDS_RE for generic
+    vocabulary (QTL, allele, marker, chromosome, locus, genotype, "gene
+    expression") — a genuinely distinct concern from gene-NAME extraction,
+    so no duplication risk.
+  - Cultivar/location/trait: checked against the REAL current values in
+    structured_data.get_available_cultivars/locations/traits(), cached once
+    per process as frozensets — NOT a hardcoded keyword list. A hardcoded
+    list would false-trigger constantly ("Black"/"Red" are both market
+    classes and ordinary English words; "Elora" could appear in a paper's
+    author affiliation rather than as a trial site). Checking against what's
+    ACTUALLY in the database only fires when a term genuinely resolves to
+    something, and stays correct automatically as trial data is added —
+    nothing to maintain in parallel.
+  - ONE DELIBERATE DEVIATION from pure per-token set membership: real
+    cultivar names can be multi-word ("Black Turtle Soup") or hyphenated,
+    and Change 6's trait labels use underscores ("days_to_maturity") that
+    never appear in natural phrasing ("days to maturity"). Per-token hash
+    lookup silently misses both. Matching is a word-boundary regex search
+    per cached value instead (normalizing underscores to spaces first) —
+    still frozenset-backed, still fast at the realistic scale of a lab's
+    trial data (tens to low hundreds of distinct values), just not a literal
+    O(1) hash lookup. Verified against both edge cases directly.
+  - Year: a simple \b(19|20)\d{2}\b regex; multiple distinct years in one
+    query become a year_range instead of a single year.
+
+INTEGRATION AND ORDERING FIXES THIS REQUIRED (both in qa_with_ollama.py and
+  hf_space/app.py):
+  - Literature retrieval and structured-data lookup run CONCURRENTLY via
+    ThreadPoolExecutor, not sequentially — they're independent of each
+    other. In hf_space/app.py's chat(), which is a plain synchronous
+    generator (not async def — worth being precise about this), threads are
+    the right tool specifically because there's no async context to plug
+    into.
+  - strict_evidence (qa_with_ollama.py) and the out-of-scope gate
+    (hf_space/app.py, deploy/app.py) both used to hard-stop purely on
+    literature-retrieval confidence. Both now check for structured trial
+    data FIRST — a narrow "yield of X in Y" question can have genuinely thin
+    literature coverage but a real structured-data answer, and the old logic
+    would have discarded it before this fix.
+  - Gene validation runs unconditionally regardless of run_gene_validation
+    (see STEP 15's integration note) — the flag is a signal, not a gate.
+  - Raw-vs-expanded query handling required NO extra plumbing beyond what
+    the router already does: since the router extracts specific matched
+    STRINGS from the raw query (not the whole query text, expanded or not),
+    and query_trial_data() is called with exactly those extracted strings,
+    the raw/expanded separation the design asked for falls out of the
+    router's own construction rather than needing separate handling.
+
+TESTED END-TO-END with synthetic fixtures at every layer (router decision →
+  structured_data query → prompts.build_messages() prompt assembly),
+  including the flagship example: "What was the yield of Rex in Elora in
+  2019?" correctly detects cultivar=Rex, location=Elora, trait=yield,
+  year=2019, and the assembled prompt places the resulting TRIAL DATA
+  section before RETRIEVED SOURCES exactly as designed.
+
+
+================================================================================
+21. STEP 18 — CONVERSATION MEMORY  (Change 8, hf_space/app.py + prompts.py)
+================================================================================
+
+CONCEPT: Before Change 8, every question was answered independently — a
+  follow-up like "Which of those are found in navy bean cultivars?" had no
+  antecedent for "those" to resolve against. Change 8 adds a per-session
+  short-term memory: the last 3 question/answer pairs, replayed to the LLM
+  as real conversation turns, plus a small retrieval-side fix so follow-up
+  questions actually find the right chunks in the first place.
+
+FILES: hf_space/app.py (session store, wiring), hf_space/prompts.py +
+  src/prompts.py (build_messages_with_history(), kept in sync per the usual
+  convention even though only the Space currently calls it — batch/HPCC
+  runs, STEP 8, don't have a multi-turn "session" concept to hang memory on,
+  so this is scoped to the Space only, same as Changes 3 and 5).
+
+★ A DISCOVERY THAT CHANGED THE SCOPE OF THIS CHANGE: hf_space/app.py already
+  had a partial, ad hoc attempt at conversation memory before this — it
+  built a "context_query" by blindly concatenating the last 4 rendered
+  Gradio chat messages (200 chars each) onto every retrieval query,
+  regardless of whether the current question needed it, and separately
+  spliced the last 6 rendered messages into the LLM's message list as fake
+  prior turns. Two real problems were found in it, not assumed:
+  1. It always diluted the retrieval query with recent conversation text,
+     even for fully self-contained questions — this hurts retrieval
+     precision on the majority of questions that AREN'T follow-ups.
+  2. Far more serious: it fed a multi-message array into call_llm(), but
+     _call_gemini() — the Tier 1 handler, used for the large majority of
+     answers thanks to Gemini's generous free quota — collapsed the ENTIRE
+     messages list down to just the FIRST system message and the FIRST user
+     message via `next(...)`. Once a second turn existed, that first "user"
+     message was an OLDER question, not the current one — meaning the
+     current question and its freshly retrieved RETRIEVED SOURCES block
+     were silently dropped from what Gemini actually saw. Verified directly
+     (not assumed) by reproducing the exact string Gemini would have
+     received before and after the fix — see ERROR 16.
+  Because of finding #2, implementing Change 8's spec correctly required
+  fixing _call_gemini() first — otherwise the new, more deliberate history
+  feature would have inherited the exact same silent-drop bug.
+
+HOW IT WORKS NOW:
+
+  1. SESSION STORE (hf_space/app.py): a server-side dict, `_conversations`,
+     keyed by `request.session_hash` (the same identifier already used by
+     the rate limiter) — NOT the Gradio `history` UI list. This is a
+     deliberate change from the old ad hoc approach: `history` is display
+     state — it contains step-status placeholders ("Retrieving relevant
+     passages...") and the fully footer-laden final answer (faithfulness
+     warning + gene footer + reference list) — none of which are things a
+     future turn should be asked to reason about as if they were real
+     conversation content.
+       _get_history(session)             → last ≤3 (question, answer) tuples,
+                                            or [] if the session has no entry
+                                            or its last activity was more
+                                            than CONVERSATION_TTL ago
+       _append_history(session, q, a)     → appends the CLEAN answer (before
+                                            any footer/references are added),
+                                            truncated to 1500 chars, trims to
+                                            the last CONVERSATION_TURNS (3)
+       CONVERSATION_TTL = 30 * 60 seconds; CONVERSATION_TURNS = 3
+     A daemon thread (_sweep_conversations, same pattern as the existing
+     _logger_thread) purges sessions whose last activity exceeds the TTL
+     every 5 minutes, so abandoned sessions don't grow _conversations
+     unboundedly — well within the Space's 16GB RAM limit at any realistic
+     concurrent-user count.
+
+  2. RETRIEVAL-SIDE COREFERENCE (hf_space/app.py, _needs_context() /
+     _augment_query_with_history()): rather than always prepending prior
+     text (the old approach's flaw), the previous question is prepended to
+     the CURRENT query ONLY when the current message looks like it can't
+     stand alone — contains a pronoun (it/its/this/that/these/those/they/
+     them/their/itself) or is at most 6 words. This is intentionally a
+     cheap heuristic (regex + word count), not an LLM call: a false
+     positive only costs a little extra (harmless) context on the
+     embedding; a false negative just means that one query behaves as it
+     did before Change 8. Only the immediately preceding question is
+     prepended — not the answer, and not older turns — since the antecedent
+     for a pronoun is almost always in the question just asked. This
+     augmented query is used for retrieval only; the router (STEP 17) still
+     runs on the raw, un-augmented message, matching the router's own
+     already-established principle of routing off raw text.
+
+  3. LLM-SIDE HISTORY REPLAY (build_messages_with_history(), prompts.py,
+     both copies): builds `[system] + [user, assistant] * up to 3 prior
+     turns + [current fully-formatted user turn]`. The current turn's
+     message (RETRIEVED SOURCES + TRIAL DATA + question) is built by calling
+     the existing build_messages() and taking just its last (user) entry —
+     no duplicated context-assembly logic. Prior turns replay only their
+     plain question/answer text, NOT that turn's retrieved sources or trial
+     data — this bounds prompt growth to roughly 3x a question+answer pair
+     rather than 3x a full context dump, and means the model treats earlier
+     answers as established conclusions rather than re-deriving them from
+     stale evidence each turn (the CURRENT turn's retrieval is what supplies
+     fresh evidence).
+
+  4. GEMINI MULTI-TURN FIX (_call_gemini(), hf_space/app.py): now converts
+     the ENTIRE messages list into Gemini's actual multi-turn shape — all
+     system-role content joins into a top-level `systemInstruction`, and
+     every remaining message becomes one entry in `contents`, with role
+     "user" kept as "user" and "assistant" mapped to Gemini's "model" role.
+     This is what makes step 3 actually reach the model correctly instead
+     of being silently truncated to the first user message — see ERROR 16.
+
+WHAT WAS DELIBERATELY NOT DONE:
+  - No LLM-based coreference resolution — the cheap heuristic in step 2 was
+    judged sufficient for the stated goal ("simple coreference resolution");
+    an LLM call per query would cost real quota for a problem the regex
+    already handles for the common cases described in the request (pronouns,
+    short follow-ups).
+  - Not wired into qa_with_ollama.py / eval_qa.py / eval_ragas.py / deploy/
+    app.py — batch evaluation runs ask each benchmark question independently
+    by design (STEP 9's benchmark has no notion of question sequence or
+    session), and deploy/app.py has not received any of the Space-only
+    features added since Change 3 (faithfulness, gene footer, structured
+    data, router) — conversation memory follows the same established scope
+    boundary.
+  - _call_groq() / _call_openrouter() / _call_together() needed NO changes —
+    they already forward the full `messages` array to standard OpenAI-
+    compatible chat endpoints, which have supported multi-turn message
+    arrays all along. Only Gemini's REST API (used directly via requests.post(),
+    not an SDK — see the LLM waterfall section under STEP 10) has its own,
+    different multi-turn shape, which is what _call_gemini() had never
+    accounted for.
+
+
+================================================================================
+22. KEY ERRORS ENCOUNTERED AND HOW THEY WERE FIXED
+================================================================================
+
+ERROR 1: transformers incompatible with huggingface-hub
+  Symptom: ImportError when importing sentence_transformers on HPCC
+  Cause: sentence-transformers required transformers<4.46 which required
+         huggingface-hub<0.24, but we needed huggingface-hub>=0.24 for
+         snapshot_download to work correctly.
+  Fix: conda run -n bean_llm pip install "transformers>=4.46.0"
+       (newer transformers is compatible with any huggingface-hub version)
+
+ERROR 2: HTTP 402 Payment Required from LLM API
+  Symptom: ⚠️ LLM error: 402 Client Error: Payment Required
+  Cause: HuggingFace Spaces sets OPENAI_BASE_URL environment variable to their
+         paid inference router. The Groq SDK (and OpenAI SDK) both read this
+         variable and redirect all API calls to HF's router, which requires payment.
+  Fix: Stop using SDKs. Use requests.post() with hardcoded API URLs:
+         requests.post("https://api.groq.com/openai/v1/chat/completions", ...)
+       Raw HTTP calls ignore environment variables entirely.
+
+ERROR 3: HTTP 413 Request Too Large from Groq
+  Symptom: Groq returns 413 Request Entity Too Large
+  Cause: Groq's free tier has a 6000 tokens/minute limit. Our initial config
+         retrieved TOP_K=10 chunks at 512 tokens each = 5120 tokens of context
+         plus the question and system prompt often exceeded 6000 total.
+  Fix: Reduced TOP_K from 10 to 6. With TOP_K=6, total context ~3000 tokens
+       → well within limit.
+
+ERROR 4: Gemini API 404 with %0A in URL
+  Symptom: ⚠️ Gemini error: 404 Client Error: Not Found
+           URL contained %0A (URL-encoded newline)
+  Cause: HuggingFace Spaces injects a trailing newline (\n) into secret values.
+         The API key was "AIzaSy...xyz\n". When embedded in the URL for Gemini's
+         REST API (?key=AIzaSy...xyz%0A), the URL becomes invalid.
+  Fix: Added .strip() to all secret reads:
+         GEMINI_API_KEY = os.environ.get("Googlegeminiapi", "").strip()
+
+ERROR 5: Space stuck in "Building" for 20+ hours
+  Symptom: HuggingFace Space shows "Building" status with no progress
+  Cause: vector_db/ (875 MB) was stored in the Space's own git repo via Git LFS.
+         Every restart triggered git lfs pull which re-downloaded everything as
+         part of the Docker build. The build timed out before completing.
+  Fix:
+    1. git rm -r --cached vector_db/  (stop tracking in Space repo)
+    2. Pushed vector_db to a separate HF Dataset repo
+    3. Added snapshot_download() to app.py startup code
+    4. The Space now builds in ~2 minutes and downloads vector_db at runtime
+
+ERROR 6: Space health check hanging (SSR mode)
+  Symptom: App prints "Running on local URL: http://0.0.0.0:7860" in logs
+           but Space stays in "Building" or "Restarting" state indefinitely
+  Cause: Gradio 6.10 has Server-Side Rendering (SSR) enabled by default.
+         SSR requires the app to handle an initial render request before HF's
+         health check gets a 200 OK response. The SSR render was hanging.
+  Fix: demo.launch(ssr_mode=False)
+
+ERROR 7: Gradio UserWarning about theme/css in gr.Blocks
+  Symptom: UserWarning: theme and css passed to gr.Blocks() are deprecated
+  Cause: Gradio 6.10.0 moved theme and css to the launch() call.
+  Fix: with gr.Blocks(title="...", css=_CSS) as demo:
+       demo.launch(theme=gr.themes.Soft(), css=_CSS, ssr_mode=False)
+
+ERROR 8: HF Dataset 401 Repository Not Found
+  Symptom: System error: Failed to load ChromaDB: 401 Client Error...
+           Repository Not Found for url: .../Parimalanath/bean-lab-vector-db
+  Cause: The HF Dataset repo was referenced in app.py but had not been created
+         yet on HuggingFace.
+  Fix: Create the dataset repo at huggingface.co/new-dataset and push the
+       vector_db files (see STEP 11 above).
+
+ERROR 9: "Out of scope" error for greetings like "Hello"
+  Symptom: Typing "Hello" returned "I couldn't find relevant research for that"
+  Cause: The word "Hello" was embedded and compared to all scientific chunks.
+         The closest chunk had distance > NO_MATCH_THRESHOLD = 1.10, triggering
+         the out-of-scope message. This looked very rude.
+  Fix: Added _GREETINGS set. Before the distance check, test if
+       question.lower() is in _GREETINGS and return a friendly welcome instead.
+
+ERROR 10: Vector store count mismatch (21788 vs 21876)
+  Symptom: ChromaDB had 21788 chunks but processing_metadata said 21876
+  Cause: After fixing the transformers/huggingface-hub incompatibility, the
+         embedding job needed to be re-run, but the old embeddings.npy had
+         fewer entries (generated before the fix with some batches failing).
+  Fix: Re-ran sbatch jobs/generate_embeddings.sb then jobs/build_vector_store.sb.
+       Final count: 21876 chunks.
+
+ERROR 11: Latent query-embedder mismatch, surfaced by the embedding-model
+          upgrade (Change 1: all-MiniLM-L6-v2 → BAAI/bge-large-en-v1.5)
+  Symptom: Not observed as a live crash — caught during code review before
+           the upgraded vector store was ever queried in production. Would
+           have appeared as a ChromaDB dimension-mismatch exception the
+           first time eval_qa.py, qa_with_ollama.py, or interactive_qa.py
+           called BeanRetriever.retrieve() against the rebuilt (1024-dim)
+           vector_db/.
+  Cause: BeanRetriever(collection) can be constructed with or without an
+         explicit `embedder=`. When no embedder is given, _chromadb_query()
+         used to fall back to collection.query(query_texts=[...]), which
+         makes ChromaDB embed the query itself using its own DEFAULT
+         embedding function — which happens to be all-MiniLM-L6-v2. As long
+         as the *stored* vectors were ALSO all-MiniLM-L6-v2 (384-dim), this
+         coincidentally produced query vectors in the same space as the
+         stored ones, even though nothing was explicitly keeping them in
+         sync. Only hf_space/app.py and deploy/app.py ever passed an
+         explicit embedder; eval_qa.py, qa_with_ollama.py, and
+         interactive_qa.py did not. Once generate_embeddings.py switched to
+         BAAI/bge-large-en-v1.5 (1024-dim), that coincidence broke.
+  Fix: Added BeanRetriever._load_embedder() (both retriever.py copies) which
+       lazily loads BAAI/bge-large-en-v1.5 itself on first query if the
+       caller didn't already inject one — fixes every affected caller
+       without editing any of them individually, and removes the underlying
+       design flaw (silently depending on ChromaDB's default matching
+       whatever the store happens to use). Same pattern applied inside
+       build_vector_store.py's run_validation_queries() and
+       test_vector_store.py's smoke test.
+  Also fixed: the BGE asymmetric query/passage instruction prefix (STEP 4/6).
+  Not yet done: the confidence-label distance thresholds need re-validation
+       against the new embedding space (see the ⚠ note under STEP 6).
+
+ERROR 12: eval_qa.py's benchmark had never actually scored a single answer
+  Symptom: Not observed as a live crash report — found via a deliberate
+           sanity-check test run while verifying Change 4's new
+           confidence_appropriate scoring logic.
+  Cause: score_answer() in src/eval_qa.py calls re.findall() and re.search(),
+         but the module never had `import re` at all. Every single run of
+         this script, from when it was first written, would have crashed
+         with NameError on the very first question it tried to score.
+  Fix: Added `import re` to src/eval_qa.py.
+  IMPLICATION: any historical claim about this system's answer quality
+       before Change 4 was based on manual spot-checking, not this script's
+       automated output — the script had never successfully completed a run.
+
+ERROR 13: Live Hugging Face token leaked in plaintext in a SLURM job script
+  Symptom: Found via a routine review pass of jobs/run_ollama_qa.sb while
+           editing an unrelated section of that file for Change 2.
+  Cause: A URL of the form
+         https://Parimalanath:hf_<redacted>@huggingface.co/spaces/... had
+         been pasted into the bottom of the file, apparently accidentally,
+         with write-level HF credentials embedded in plaintext.
+  Fix: Removed the line from the file. IMPORTANT: removing it from the file
+       does NOT invalidate a token that has already been exposed — the
+       token was flagged for rotation at huggingface.co/settings/tokens.
+       If you're reading this and haven't rotated it yet, do that now.
+  Searched (and found no further copies): grepped the whole project tree and
+       logs/ for the same token string and for any other hf_<30+ chars>
+       pattern — nothing else turned up.
+
+ERROR 14: Change 2's hybrid retrieval surfaced multiple None-distance bugs
+  Symptom: Would have appeared as TypeError: '>' not supported between
+           instances of 'NoneType' and 'float' the first time a BM25-only
+           chunk (distance=None) reached certain comparison sites — found
+           during code review while implementing Change 2/3, before any of
+           these were exercised in production.
+  Cause: Several places used the pattern `value = chunk.get("distance", 1.0)`
+         and then compared `value` to a threshold. This pattern only applies
+         the default when the KEY IS MISSING — if the key exists with an
+         explicit value of None (which every BM25-only chunk has, by
+         design), .get() returns None, not 1.0, and the subsequent
+         comparison crashes.
+  Fix: Replaced with a two-line pattern everywhere this occurred:
+         d = chunk.get("distance"); d = 1.0 if d is None else d
+       Sites fixed: assess_confidence() and apply_similarity_threshold()
+       (retriever.py, hf_space copy only for the latter — src/retriever.py
+       never had that function), build_context() and format_references()
+       (prompts.py, both copies), and the _out_of_scope() gate in
+       hf_space/app.py and deploy/app.py (which also got a semantic change,
+       not just a crash fix: a BM25-only top result no longer triggers
+       "out of scope" at all — see STEP 12/17).
+
+ERROR 15: NCBI/UniProt don't catalog classical bean genetics nomenclature
+  Symptom: Not a crash — a design-premise check performed BEFORE writing
+           gene_validator.py, specifically because the intended approach
+           (validate every gene mention against NCBI Gene + UniProt) was
+           about to be built without first confirming the two named
+           databases would ever actually recognize the motivating examples
+           (Co-1, Phg-1, bc-1/2/3, fin, Ppd).
+  Cause: verified directly against the live NCBI eutils and UniProt REST
+         APIs (not assumed from documentation): 0 results for
+         `Co-1[Gene Name] AND txid3885[Organism]`, 0 results for
+         `gene:bc-3`/`gene:Fin` at organism_id:3885, 0 results for a
+         full-text "anthracnose" search across all P. vulgaris NCBI gene
+         records. These databases are populated by genome-annotation
+         pipelines, not curated with classical breeding-literature gene
+         symbols.
+  Fix: Added a small, explicitly-labeled CLASSICAL_GENE_SYMBOLS allowlist in
+       gene_validator.py (see STEP 15) and changed the gene-verification
+       footer from two-way (verified/not-found) to three-way
+       (ncbi-or-uniprot-verified / known-classical-symbol / not-found), so a
+       real, well-established gene isn't misreported as suspicious just
+       because the two chosen databases don't happen to catalog it.
+
+ERROR 16: _call_gemini() silently dropped the current turn once conversation
+          history existed (found while implementing Change 8)
+  Symptom: Not observed as a live crash report — found via code review of
+           hf_space/app.py's pre-existing (pre-Change-8) ad hoc conversation-
+           history logic, then confirmed by reproducing the exact string
+           Gemini would have received, both before and after the fix, in a
+           synthetic test with no network calls.
+  Cause: _call_gemini(messages) built its request as
+         `sys_ = next(m["content"] for m in messages if m["role"]=="system")`
+         and `usr_ = next(m["content"] for m in messages if m["role"]=="user")`
+         — `next()` returns the FIRST match only. As long as `messages` held
+         exactly one system + one user message (true for every call before
+         Change 8's history feature), this was harmless. The moment a
+         messages list contains multiple user/assistant turns (a
+         prerequisite for any conversation-memory feature, old or new), this
+         silently picks the OLDEST user message in the array as "usr_" and
+         ignores every later one — including the current turn's actual
+         question and its freshly retrieved RETRIEVED SOURCES/TRIAL DATA
+         block, which live in the LAST user message, not the first. Gemini
+         is Tier 1 in the LLM waterfall (STEP 10) and handles the large
+         majority of answers given its free-tier quota, so this would have
+         been the dominant behavior, not an edge case.
+  Fix: Rewrote _call_gemini() to convert the full messages list into
+       Gemini's actual multi-turn request shape: every "system" message's
+       content joins into one top-level `systemInstruction`, and every
+       remaining message becomes an entry in `contents`, mapping role
+       "assistant" → Gemini's "model" (Gemini's own name for that role) and
+       leaving "user" as "user". Verified with a synthetic messages list
+       built from build_messages_with_history() (STEP 18): confirmed the
+       new payload's last `contents` entry contains the current question and
+       "RETRIEVED SOURCES", and confirmed the OLD code path's flattened
+       string did NOT contain either — reproducing the bug and the fix side
+       by side rather than reasoning about it in the abstract.
+  Note: _call_groq(), _call_openrouter(), and _call_together() were NOT
+       affected — they forward `messages` as-is to standard OpenAI-
+       compatible endpoints, which already handle multi-turn arrays
+       correctly. Only Gemini's REST API (called directly via requests.post(),
+       not an SDK) has a different multi-turn shape that this codebase had
+       never previously needed to produce.
+
+
+================================================================================
+23. SLURM JOB SCRIPTS REFERENCE  (jobs/)
+================================================================================
+
+CONCEPT: What is SLURM?
+  SLURM is the job scheduler on HPCC. Instead of running a script directly
+  (which would use the login node's weak CPU), you submit it as a "job" and
+  SLURM assigns it to a compute node with the resources you requested.
+
+--- jobs/process_pdfs.sb ---
+  Resources: 1 task, 8 CPUs, 32GB RAM, 4 hours, no GPU
+  Purpose: Run src/pdf_processor.py on all PDFs
+  Output: data/processed_chunks.json (~21,876 chunks)
+
+--- jobs/generate_embeddings.sb ---
+  Resources: 1 task, 4 CPUs, 32GB RAM, 2 hours, 1 GPU (V100)
+  Purpose: Run src/generate_embeddings.py (BAAI/bge-large-en-v1.5, batch_size=16)
+  Output: data/embeddings.npy, data/embeddings_metadata.json
+
+--- jobs/build_vector_store.sb ---
+  Resources: 1 task, 4 CPUs, 16GB RAM, 1 hour, no GPU
+  Purpose: Run src/build_vector_store.py — ChromaDB AND the BM25 index
+           (Change 2 folded BM25 building into this same job/script)
+  Output: vector_db/ (chroma.sqlite3, *.bin, bm25_index.pkl, database_statistics.json)
+
+--- jobs/build_gene_index.sb ---  (Change 5, NEW)
+  Resources: 1 task, 2 CPUs, 8GB RAM, 1 hour, no GPU
+  Purpose: Run src/build_gene_index.py — downloads NCBI gene_info.gz +
+           UniProt's P. vulgaris subset, builds vector_db/gene_index.pkl
+  NEEDS: outbound HTTPS network access to ftp.ncbi.nlm.nih.gov and
+         rest.uniprot.org. If compute nodes block this, the job script's
+         comments describe downloading gene_info.gz on a login node first
+         and passing it via --gene-info-path.
+
+--- jobs/extract_structured_data.sb ---  (Change 6, NEW)
+  Resources: 1 task, 8 CPUs, 32GB RAM, 8 hours, 1 GPU (V100) + Ollama
+  Purpose: Run src/extract_structured_data.py — LLM-extracts trial data from
+           candidate chunks into vector_db/trial_data.db
+  Includes a --dry-run candidate-count check before committing GPU time to
+  the full extraction pass; if the count is too large for the time budget,
+  cancel and re-submit with --limit or split by year_range.
+
+--- jobs/run_ollama_qa.sb ---
+  Resources: 1 task, 8 CPUs, 32GB RAM, 4 hours, 1 GPU (V100) + Ollama
+  Purpose: Run src/qa_with_ollama.py — batch QA against a question list.
+           As of Change 7, automatically routes each question (literature /
+           structured data / gene validation) with no flags needed; the old
+           --hybrid/--bm25-index/--trace-file flags were removed in Change 2
+           since hybrid retrieval is now automatic. --strict-evidence still
+           works as before.
+
+--- jobs/run_ragas_eval.sb ---  (Change 4, NEW)
+  Resources: 1 task, 8 CPUs, 32GB RAM, 4 hours, 1 GPU (V100) + Ollama
+  Purpose: Run src/eval_ragas.py against all 75 benchmark questions, judged
+           by Gemini.
+  NEEDS: Googlegeminiapi or GEMINI_API_KEY exported in your shell BEFORE
+         calling sbatch (the job checks for this and exits early if unset).
+
+SUBMITTING JOBS:
   sbatch jobs/process_pdfs.sb
+  sbatch jobs/generate_embeddings.sb
+  sbatch jobs/build_vector_store.sb
+  sbatch jobs/build_gene_index.sb            # can run independently of the above
+  sbatch jobs/extract_structured_data.sb      # can run independently of the above
+  Googlegeminiapi="..." sbatch jobs/run_ragas_eval.sb
 
-Monitor:
-  squeue -u $USER && tail -f logs/processing.log
+  # Check status:
+  squeue -u kodumuru
 
-Verify:
-  ls -lh data/*.json && python3 -c "import json; print(len(json.load(open('data/processed_chunks.json'))))"
+  # View output:
+  tail -f logs/generate_embeddings_JOBID.out
+
+  # Cancel a job:
+  scancel JOBID
+
+REMOVED in Change 2 (do not look for these — they no longer exist):
+  jobs/build_bm25_index.sb, jobs/run_ollama_qa_hybrid.sb
+
 
 ================================================================================
-END OF DOCUMENTATION INDEX
+24. CONDA ENVIRONMENT & PYTHON DEPENDENCIES
 ================================================================================
 
-For more information, start with: README.md or QUICK_START.md
+Environment name: bean_llm
+Python version: 3.11
+Conda base path: /mnt/scratch/kodumuru/conda
 
-Project Location: /mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/
-Questions? Check the documentation files listed above.
+HPCC packages (installed in bean_llm — see requirements.txt for the
+authoritative, currently-pinned list):
+  PyPDF2==3.0.1            — PDF reading
+  pytesseract==0.3.10      — OCR wrapper
+  pdf2image==1.17.0        — PDF to image for OCR
+  Pillow==10.4.0           — image processing (required by pdf2image)
+  tiktoken==0.7.0          — token counting (OpenAI tokenizer)
+  sentence-transformers==3.0.1  — bge-large-en-v1.5 embedding + MiniLM cross-encoder
+  transformers>=4.46.0     — required by sentence-transformers
+  torch==2.3.0+cu121       — PyTorch with CUDA 12.1 for V100
+  chromadb==1.5.4          — vector database
+  rank-bm25>=0.2.2         — hybrid keyword retrieval (Change 2)
+  tqdm==4.66.4             — progress bars
+  numpy==1.26.4            — numerical arrays
+  huggingface-hub>=0.24.0  — snapshot_download, model downloads
+  requests==2.32.3         — HTTP client for API calls
 
+  RAGAS evaluation stack (Change 4 — eval_ragas.py only, NOT used by the
+  core pipeline or either deployed app):
+    ragas==0.2.15
+    langchain==0.3.25
+    langchain-community==0.3.7
+    langchain-core>=0.3.17,<0.4.0
+    langchain-google-genai==2.0.11
+  PINNED TIGHTLY, DELIBERATELY. This combination was verified by actually
+  installing it in an isolated venv, not by reading documentation — two real
+  resolution failures were hit along the way: (1) ragas hard-imports
+  langchain_community.chat_models.vertexai at module load time regardless of
+  version, which recent langchain-community releases no longer have; (2)
+  langchain-google-genai>=3.0 requires langchain-core>=1.0, which conflicts
+  with ragas 0.2.x's langchain-core<0.4 requirement. The exact set above was
+  confirmed to install and import together, AND confirmed that the full
+  requirements.txt (including chromadb, sentence-transformers, torch, etc.)
+  resolves as one consistent set with these pins — not just checked in
+  isolation. Do not bump any of these five packages individually without
+  re-verifying the whole set still resolves.
+
+  gene_validator.py, structured_data.py, query_router.py, build_gene_index.py,
+  and extract_structured_data.py (Changes 5-7) add ZERO new dependencies —
+  all pure standard library (re, os, pickle, sqlite3, pathlib, dataclasses,
+  concurrent.futures, gzip, urllib.request). Only requests (already present)
+  and, for build_gene_index.py, network access are needed.
+
+HuggingFace Space packages (hf_space/requirements.txt):
+  gradio==6.10.0
+  chromadb>=1.5.0,<2.0.0
+  sentence-transformers>=2.7.0,<4.0.0
+  huggingface-hub>=0.24.0,<2.0.0
+  requests>=2.31.0
+  numpy>=1.24.0,<2.0.0
+  pyvis>=0.3.2
+  rank-bm25>=0.2.2         — hybrid retrieval (Change 2)
+
+  Note: the Space does NOT need ragas/langchain — RAGAS evaluation (STEP 14)
+  is an HPCC-only offline process, never deployed.
+
+deploy/requirements.txt: same core set as hf_space, plus rank-bm25 (since
+  deploy/app.py imports src/retriever.py directly, which now depends on it
+  to unpickle bm25_index.pkl if present).
+
+
+================================================================================
+25. API KEYS & SECRETS REFERENCE
+================================================================================
+
+All secrets are set in HuggingFace Space Settings → Variables and Secrets.
+They are NOT stored in any file in the repository. (See ERROR 13 for what
+happens when a real credential ends up in a committed file instead.)
+
+  Secret Name        | API Service    | Where to Get It                | Used For
+  -------------------|----------------|--------------------------------|------------------------
+  Googlegeminiapi    | Google Gemini  | aistudio.google.com → API Keys  | Tier 1 generation (STEP 10),
+                      |                |                                 | faithfulness check (STEP 13),
+                      |                |                                 | RAGAS judge on HPCC (STEP 14)
+  groq               | Groq           | console.groq.com → API Keys    | Tier 2 generation fallback
+  OPENROUTER_API_KEY | OpenRouter     | openrouter.ai → Keys           | Tier 3 generation fallback
+  TOGETHER_API_KEY   | Together AI    | api.together.xyz → Settings    | Tier 4 generation fallback
+
+  For eval_ragas.py on HPCC (not the Space), export Googlegeminiapi or
+  GEMINI_API_KEY in your shell before submitting jobs/run_ragas_eval.sb —
+  the job checks for this and exits immediately if neither is set.
+
+All keys are on free tiers as of April 2026:
+  Gemini 2.0 Flash: 1,000,000 TPM free (Tier 1)
+  Groq:             6,000 TPM free, resets every minute
+  OpenRouter:       dynamically routes to free available models
+  Together AI:      $1 free credit, then pay-as-you-go (very cheap)
+
+No new secrets were introduced by gene validation (STEP 15) or the
+structured data layer (STEP 16) — both are self-contained (NCBI/UniProt
+REST APIs need no auth key; SQLite is local).
+
+
+================================================================================
+26. HOW TO RE-RUN EVERYTHING FROM SCRATCH
+================================================================================
+
+If you need to rebuild the entire pipeline (e.g., new PDFs are added):
+
+STEP A: Log into HPCC
+  ssh kodumuru@hpcc.msu.edu
+  ssh dev-amd20-v100     (to get GPU node for testing)
+
+STEP B: Activate environment
+  source /mnt/scratch/kodumuru/conda/etc/profile.d/conda.sh
+  conda activate bean_llm
+
+STEP C: Copy any new PDFs
+  bash scripts/analyze_and_copy_pdfs.sh
+
+STEP D: Process PDFs
+  sbatch jobs/process_pdfs.sb
+  # Wait for it to finish (squeue -u kodumuru)
+  # Check: wc -l data/processed_chunks.json (should show large number)
+
+STEP E: Generate embeddings
+  sbatch jobs/generate_embeddings.sb
+  # Uses BAAI/bge-large-en-v1.5 (batch_size=16) as of the Change 1 upgrade —
+  # see STEP 4 and ERROR 11.
+  # Wait for it to finish (~3-5 minutes on V100 for 21k chunks)
+  # Check: python3 -c "import numpy as np; e=np.load('data/embeddings.npy'); print(e.shape)"
+  # Should print: (21876, 1024)
+
+STEP F: Build vector store + BM25 index
+  sbatch jobs/build_vector_store.sb
+  # Wait for it to finish (~5 minutes). Builds ChromaDB AND bm25_index.pkl
+  # in the same run (Change 2) — no separate BM25 job exists anymore.
+  # Check: du -sh vector_db/
+
+STEP G (optional but recommended): Build the gene index and structured data
+  sbatch jobs/build_gene_index.sb            # ~few minutes, no GPU
+  sbatch jobs/extract_structured_data.sb      # hours, needs GPU + Ollama —
+                                              # run --dry-run first to check
+                                              # candidate chunk count
+  # Both are independent of each other and of STEP F — can run in any order
+  # or in parallel with it.
+
+STEP H: Push vector_db/ (now containing chroma.sqlite3, bm25_index.pkl,
+  gene_index.pkl, trial_data.db) to the HF Dataset repo
+  cd /mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/hf_dataset_upload
+  cp -r ../vector_db/* .
+  git add .
+  git commit -m "update vector database $(date +%Y-%m-%d)"
+  git push origin main
+  # If pushing for the first time (repo doesn't exist yet): follow STEP 11
+
+STEP I: Restart HuggingFace Space
+  Go to: huggingface.co/spaces/Parimalanath/bean-lab-qa
+  Settings → Restart Space
+  Watch the logs — should show ChromaDB, BM25, gene index, and trial data
+  all loading (see STEP 11's VERIFICATION section for exact log lines)
+
+STEP J: Test the deployment
+  Ask a literature question: "What nitrogen fixation rates have been measured?"
+  Ask a structured-data question (if trial_data.db has relevant rows):
+    "What was the yield of <a cultivar in your data> in <a location> in <a year>?"
+  Ask a genetics question: "What does the Co-1 gene do?"
+  Each should return a detailed answer with DOI citations, and the gene
+  question's answer should get a gene-verification footer.
+
+STEP K (optional): Run the evaluation suite
+  export Googlegeminiapi="your-key"
+  sbatch jobs/run_ragas_eval.sb
+  # Compare data/ragas_results.json's aggregate scores against your last run
+  # to catch quality regressions from future changes.
+
+================================================================================
+END OF DOCUMENTATION
 ================================================================================

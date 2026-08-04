@@ -29,9 +29,9 @@ echo ""
 module purge
 
 # Activate conda environment using hardcoded path (avoids module conflict with Python)
-CONDA_BASE="/mnt/scratch/kodumuru/conda"
+CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate bean_llm
+conda activate /mnt/scratch/kodumuru/conda/envs/bean_llm
 
 # Print environment info
 echo "Python version:"
@@ -85,8 +85,8 @@ python3 src/generate_embeddings.py \
     --output-embeddings "${PROJECT_DIR}/data/embeddings.npy" \
     --output-metadata "${PROJECT_DIR}/data/embeddings_metadata.json" \
     --log-file "${PROJECT_DIR}/logs/embeddings_${SLURM_JOB_ID}.log" \
-    --model "all-MiniLM-L6-v2" \
-    --batch-size 32 \
+    --model "BAAI/bge-large-en-v1.5" \
+    --batch-size 16 \
     --device cuda
 
 EXIT_CODE=$?

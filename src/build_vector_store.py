@@ -33,7 +33,9 @@ Date: 2026-03-21
 # ============================================================================
 
 import os
+import sys
 import json
+import pickle
 import logging
 import numpy as np
 from pathlib import Path
@@ -50,6 +52,17 @@ except ImportError as e:
     print(f"Error: ChromaDB not installed: {e}")
     print("Install with: pip install chromadb")
     exit(1)
+
+# BM25 keyword index (optional — hybrid retrieval is skipped if unavailable)
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
+
+# tokenize_bm25/_filename_to_doi must match retriever.py exactly, since the
+# same tokenizer is used again at query time
+sys.path.insert(0, str(Path(__file__).parent))
+from retriever import tokenize_bm25, _filename_to_doi
 
 # Progress tracking
 from tqdm import tqdm
@@ -131,6 +144,8 @@ class VectorStoreBuilder:
             "year_ranges": [],
             "unique_sources": 0,
             "embedding_dimension": 0,
+            "bm25_index_built": False,
+            "bm25_index_size_mb": 0,
             "errors": []
         }
 
@@ -316,7 +331,7 @@ class VectorStoreBuilder:
                 name=self.collection_name,
                 metadata={
                     "description": "Bean research documents from 1961-2026",
-                    "embedding_model": "all-MiniLM-L6-v2",
+                    "embedding_model": "BAAI/bge-large-en-v1.5",
                     "creation_date": datetime.now().isoformat()
                 }
             )
@@ -451,6 +466,97 @@ class VectorStoreBuilder:
 
         self.logger.info("="*80)
 
+    def build_bm25_index(self, metadata_list: List[Dict], texts: List[str]):
+        """
+        Build a BM25 keyword index over the same chunks, tokenized the same
+        way retriever.py will tokenize queries, and pickle it alongside
+        ChromaDB at <db_path>/bm25_index.pkl.
+
+        Must run from the SAME metadata_list/texts used to build the vector
+        store (both loaded together in load_data()), so that row position i
+        here matches ChromaDB's "chunk_{i}" id exactly — that shared integer
+        is what BeanRetriever uses to fuse dense and BM25 rankings via
+        Reciprocal Rank Fusion. This is why the BM25 index has to be built
+        here, not as a standalone script: build_vector_store.py is the one
+        place both already share this exact row ordering.
+
+        Soft-fails (logs and continues) if rank_bm25 isn't installed or the
+        build fails for any reason — BeanRetriever falls back to dense-only
+        retrieval automatically if bm25_index.pkl doesn't exist.
+        """
+        self.logger.info("\n" + "="*80)
+        self.logger.info("Building BM25 Keyword Index")
+        self.logger.info("="*80)
+
+        if BM25Okapi is None:
+            self.logger.warning(
+                "rank_bm25 not installed — skipping BM25 index build. "
+                "Hybrid retrieval will be unavailable; BeanRetriever falls "
+                "back to dense-only. Install with: pip install rank-bm25"
+            )
+            return
+
+        try:
+            tokenized_corpus = [tokenize_bm25(t) for t in texts]
+            bm25 = BM25Okapi(tokenized_corpus)
+
+            bm25_metadata = []
+            for meta, text in zip(metadata_list, texts):
+                source = meta.get("source_file", "unknown")
+                bm25_metadata.append({
+                    "text": text,
+                    "source": source,
+                    "doi": _filename_to_doi(source),
+                    "year_range": meta.get("year_range", "unknown"),
+                    "page": meta.get("page_number", "?"),
+                    "section": meta.get("section", ""),
+                    "chunk_id": meta.get("chunk_id"),
+                })
+
+            bm25_path = self.db_path / "bm25_index.pkl"
+            with bm25_path.open("wb") as f:
+                pickle.dump(
+                    {"format": "bean-bm25-rrf-v1", "bm25": bm25, "metadata": bm25_metadata},
+                    f,
+                )
+
+            size_mb = bm25_path.stat().st_size / (1024 * 1024)
+            self.logger.info(f"✓ BM25 index built: {len(texts)} docs")
+            self.logger.info(f"✓ Saved to {bm25_path} ({size_mb:.2f} MB)")
+            self.stats["bm25_index_built"] = True
+            self.stats["bm25_index_size_mb"] = round(size_mb, 2)
+
+        except Exception as e:
+            self.logger.error(f"Failed to build BM25 index: {e}")
+            self.logger.debug(traceback.format_exc())
+            self.stats["bm25_index_built"] = False
+
+        self.logger.info("="*80)
+
+    def _embed_query(self, text: str) -> Optional[List[float]]:
+        """
+        Embed a validation query with the same model used to build the store.
+
+        ChromaDB's `query_texts=` interface falls back to its own default
+        embedding function (a different, 384-dim model) when no explicit
+        query_embeddings are supplied. Since this store is built with
+        BAAI/bge-large-en-v1.5 (1024-dim), that default would raise a
+        dimension mismatch — so validation queries must embed locally instead.
+        Returns None if the embedder can't be loaded (caller falls back to
+        query_texts, logging why validation may fail).
+        """
+        try:
+            from sentence_transformers import SentenceTransformer
+            if not hasattr(self, "_val_embedder"):
+                self._val_embedder = SentenceTransformer("BAAI/bge-large-en-v1.5")
+            instruction = "Represent this sentence for searching relevant passages: "
+            return self._val_embedder.encode(
+                [instruction + text], normalize_embeddings=True
+            ).tolist()[0]
+        except Exception as e:
+            self.logger.warning(f"Could not load query embedder for validation: {e}")
+            return None
+
     def run_validation_queries(self):
         """
         Run validation queries to test database functionality.
@@ -471,10 +577,17 @@ class VectorStoreBuilder:
         self.logger.info(f"Query: '{test_query}'")
 
         try:
-            results = self.collection.query(
-                query_texts=[test_query],
-                n_results=3
-            )
+            query_emb = self._embed_query(test_query)
+            if query_emb is not None:
+                results = self.collection.query(
+                    query_embeddings=[query_emb],
+                    n_results=3
+                )
+            else:
+                results = self.collection.query(
+                    query_texts=[test_query],
+                    n_results=3
+                )
 
             self.logger.info(f"✓ Found {len(results['ids'][0])} results")
 
@@ -505,11 +618,19 @@ class VectorStoreBuilder:
         self.logger.info(f"Query: '{test_query}' WHERE year_range = '2007-2026'")
 
         try:
-            results = self.collection.query(
-                query_texts=[test_query],
-                n_results=3,
-                where={"year_range": "2007-2026"}  # Filter by year range
-            )
+            query_emb = self._embed_query(test_query)
+            if query_emb is not None:
+                results = self.collection.query(
+                    query_embeddings=[query_emb],
+                    n_results=3,
+                    where={"year_range": "2007-2026"}  # Filter by year range
+                )
+            else:
+                results = self.collection.query(
+                    query_texts=[test_query],
+                    n_results=3,
+                    where={"year_range": "2007-2026"}  # Filter by year range
+                )
 
             self.logger.info(f"✓ Found {len(results['ids'][0])} results from 2007-2026")
 
@@ -607,6 +728,9 @@ class VectorStoreBuilder:
         print(f"Embedding Dimension:   {self.stats['embedding_dimension']}")
         print(f"Database Size:         {self.stats['database_size_mb']} MB")
         print(f"Unique Sources:        {self.stats['unique_sources']}")
+        print(f"BM25 Index Built:      {self.stats['bm25_index_built']}")
+        if self.stats['bm25_index_built']:
+            print(f"BM25 Index Size:       {self.stats['bm25_index_size_mb']} MB")
 
         print(f"\nDate Range Coverage:")
         for year_range in sorted(self.stats['year_ranges']):
@@ -662,17 +786,20 @@ class VectorStoreBuilder:
             # Step 4: Analyze metadata
             self.analyze_metadata(metadata_list)
 
-            # Step 5: Calculate database size
+            # Step 5: Build BM25 keyword index (for hybrid retrieval)
+            self.build_bm25_index(metadata_list, texts)
+
+            # Step 6: Calculate database size (includes bm25_index.pkl)
             db_size = self.calculate_database_size()
             self.logger.info(f"\nDatabase size: {db_size:.2f} MB")
 
-            # Step 6: Run validation queries
+            # Step 7: Run validation queries
             self.run_validation_queries()
 
-            # Step 7: Save statistics
+            # Step 8: Save statistics
             self.save_statistics()
 
-            # Step 8: Print statistics
+            # Step 9: Print statistics
             self.print_statistics()
 
             self.logger.info("✓ Vector store built successfully!")

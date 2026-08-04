@@ -1,0 +1,116 @@
+#!/bin/bash
+#SBATCH --job-name=extract_structured_data
+#SBATCH --time=08:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32GB
+#SBATCH --gpus=v100:1
+#SBATCH --partition=gpu
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/extract_structured_data_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/extract_structured_data_%j.err
+
+################################################################################
+# SLURM Job Script for Structured Data Extraction (Change 6)
+#
+# Scans data/processed_chunks.json for candidate table/numeric-data chunks
+# and asks Ollama to extract structured trial records (cultivar, location,
+# year, trait, value) into data/trial_data.db (SQLite).
+#
+# IMPORTANT: this is LLM-extracted data from paper text, not a real lab
+# spreadsheet — see extract_structured_data.py's module docstring for the
+# full honesty caveat. Spot-check a sample of the output database against
+# the source PDFs before trusting it.
+#
+# Time budget: 8 hours is a rough ceiling. If the candidate-chunk count
+# printed by --dry-run (see below) suggests this will run long, consider
+# splitting by year_range or running --limit in batches across multiple jobs.
+################################################################################
+
+echo "========================================"
+echo "Structured Data Extraction Job"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "GPU: $CUDA_VISIBLE_DEVICES"
+echo "Start time: $(date)"
+echo "========================================"
+echo ""
+
+PROJECT_DIR="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "$PROJECT_DIR"
+
+mkdir -p logs data vector_db
+
+module purge
+module load Ollama/0.15.5
+
+CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate /mnt/scratch/kodumuru/conda/envs/bean_llm
+
+export LD_LIBRARY_PATH=/mnt/scratch/kodumuru/conda/envs/bean_llm/lib:$LD_LIBRARY_PATH
+export PYTHONUNBUFFERED=1
+export OLLAMA_MODELS="${PROJECT_DIR}/models/ollama"
+export OLLAMA_HOST="0.0.0.0:11434"
+export OLLAMA_NUM_PARALLEL=1
+
+echo "Starting Ollama server..."
+bash scripts/start_ollama.sh
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to start Ollama server"
+    exit 1
+fi
+sleep 5
+echo "✓ Ollama server running"
+echo ""
+
+# First, a quick dry run to see how many candidate chunks there are before
+# committing GPU time to the full extraction pass (each candidate is one
+# Ollama call). If the count looks too large for the time limit above,
+# cancel this job (scancel) and re-submit with --limit or split by
+# year_range instead of letting the full run time out partway through.
+echo "Dry run — counting candidate chunks..."
+python3 src/extract_structured_data.py \
+    --chunks-file "${PROJECT_DIR}/data/processed_chunks.json" \
+    --dry-run \
+    --log-file "${PROJECT_DIR}/logs/extract_structured_data_dryrun_${SLURM_JOB_ID}.log"
+echo ""
+
+echo "Running structured data extraction..."
+python3 src/extract_structured_data.py \
+    --chunks-file "${PROJECT_DIR}/data/processed_chunks.json" \
+    --output "${PROJECT_DIR}/vector_db/trial_data.db" \
+    --model "llama3.1:8b" \
+    --log-file "${PROJECT_DIR}/logs/extract_structured_data_${SLURM_JOB_ID}.log"
+
+EXIT_CODE=$?
+
+echo ""
+echo "========================================"
+echo "Job Complete!"
+echo "Exit code: $EXIT_CODE"
+echo "End time: $(date)"
+echo "========================================"
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "Output:"
+    ls -lh "${PROJECT_DIR}/vector_db/trial_data.db" 2>/dev/null
+    echo ""
+    echo "Sample rows:"
+    python3 -c "
+import sqlite3
+conn = sqlite3.connect('${PROJECT_DIR}/vector_db/trial_data.db')
+conn.row_factory = sqlite3.Row
+for row in conn.execute('SELECT cultivar, location, year, trait, value, unit FROM trial_records LIMIT 10'):
+    print(f'  {dict(row)}')
+print(f\"Total records: {conn.execute('SELECT COUNT(*) FROM trial_records').fetchone()[0]}\")
+" 2>/dev/null || echo "  (could not query database for sample)"
+fi
+
+echo ""
+echo "Stopping Ollama server..."
+pkill ollama 2>/dev/null
+echo "✓ Server stopped"
+
+exit $EXIT_CODE

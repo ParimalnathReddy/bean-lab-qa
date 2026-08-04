@@ -131,7 +131,7 @@ def test_embeddings():
         output_embeddings=str(test_embeddings),
         output_metadata=str(test_metadata),
         log_file=str(test_log),
-        model_name="all-MiniLM-L6-v2",
+        model_name="BAAI/bge-large-en-v1.5",
         batch_size=2,  # Small batch for testing
         device=None  # Auto-detect
     )
@@ -156,7 +156,7 @@ def test_embeddings():
             metadata = json.load(f)
 
         print(f"Embeddings shape: {embeddings.shape}")
-        print(f"Expected: ({len(test_chunks)}, 384)")
+        print(f"Expected: ({len(test_chunks)}, 1024)")
         print()
 
         print("Sample embedding (first 10 values):")

@@ -24,9 +24,20 @@ torch>=2.0.0
 # Vector database
 chromadb>=0.4.0
 
-# Document loaders and processing
-langchain>=0.1.0
-langchain-community>=0.0.20
+# BM25 keyword index for hybrid retrieval (Change 2)
+rank-bm25>=0.2.2
+
+# RAGAS evaluation pipeline (Change 4) — eval_ragas.py only, not used by the
+# core pipeline or either deployed app. PINNED TIGHTLY: this dependency chain
+# is fragile — ragas 0.2.x requires langchain-core<0.4, which conflicts with
+# langchain-google-genai>=3.0 (needs langchain-core>=1.0). Verified as an
+# actually-installable, importable combination; do not bump these
+# individually without re-checking they still resolve together.
+ragas==0.2.15
+langchain==0.3.25
+langchain-community==0.3.7
+langchain-core>=0.3.17,<0.4.0
+langchain-google-genai==2.0.11
 
 # Additional utilities
 python-dotenv>=1.0.0
@@ -41,3 +52,5 @@ requests>=2.31.0
 
 # YAML config files
 pyyaml>=6.0
+
+

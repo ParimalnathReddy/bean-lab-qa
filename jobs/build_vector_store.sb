@@ -25,9 +25,9 @@ echo ""
 module purge
 
 # Activate conda environment using hardcoded path (avoids module conflict with Python)
-CONDA_BASE="/mnt/scratch/kodumuru/conda"
+CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate bean_llm
+conda activate /mnt/scratch/kodumuru/conda/envs/bean_llm
 
 # Print environment info
 echo "Python version:"
@@ -88,3 +88,6 @@ if [ $EXIT_CODE -eq 0 ]; then
 fi
 
 exit $EXIT_CODE
+
+
+
