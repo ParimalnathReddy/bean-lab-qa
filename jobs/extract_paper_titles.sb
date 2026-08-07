@@ -1,0 +1,97 @@
+#!/bin/bash
+#SBATCH --job-name=extract_paper_titles
+#SBATCH --time=04:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32GB
+#SBATCH --gpus=v100:1
+#SBATCH --partition=gpu
+#SBATCH --output=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/extract_paper_titles_%j.out
+#SBATCH --error=/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa/logs/extract_paper_titles_%j.err
+
+################################################################################
+# SLURM Job Script for Paper Title Extraction (GraphRAG node labels)
+#
+# Extracts a real, human-readable title per paper (LLM-based — see
+# scripts/extract_paper_titles.py's docstring for why a heuristic doesn't
+# work) into data/paper_titles.json. Run scripts/build_paper_graph.py after
+# this completes to fold the titles into paper_graph.json, then re-upload
+# that file to the HF dataset repo.
+#
+# NOTE: uses ptgpu, not bean_llm — bean_llm's own python3 is a broken
+# symlink as of 2026-08-05 (see ERROR 19 in DOCUMENTATION_INDEX.txt). If
+# bean_llm gets repaired/recreated, switch this back.
+################################################################################
+
+echo "========================================"
+echo "Paper Title Extraction Job"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "Start time: $(date)"
+echo "========================================"
+echo ""
+
+PROJECT_DIR="/mnt/research/BeanLab/Parimal/BEAN_LLM/hpcc-llm-qa"
+cd "$PROJECT_DIR"
+
+mkdir -p logs data
+
+module purge
+module load Ollama/0.15.5
+
+CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate /mnt/home/kodumuru/.conda/envs/ptgpu
+
+export LD_LIBRARY_PATH=/mnt/home/kodumuru/.conda/envs/ptgpu/lib:$LD_LIBRARY_PATH
+export PYTHONUNBUFFERED=1
+export OLLAMA_MODELS="${PROJECT_DIR}/models/ollama"
+export OLLAMA_HOST="0.0.0.0:11434"
+export OLLAMA_NUM_PARALLEL=1
+
+echo "Starting Ollama server..."
+bash scripts/start_ollama.sh
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to start Ollama server"
+    exit 1
+fi
+sleep 5
+echo "✓ Ollama server running"
+echo ""
+
+echo "Running paper title extraction..."
+python3 scripts/extract_paper_titles.py \
+    --chunks-file "${PROJECT_DIR}/data/processed_chunks.json" \
+    --output "${PROJECT_DIR}/data/paper_titles.json" \
+    --model "llama3.1:8b" \
+    --log-file "${PROJECT_DIR}/logs/extract_paper_titles_${SLURM_JOB_ID}.log"
+
+EXIT_CODE=$?
+
+echo ""
+echo "========================================"
+echo "Job Complete!"
+echo "Exit code: $EXIT_CODE"
+echo "End time: $(date)"
+echo "========================================"
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "Output:"
+    ls -lh "${PROJECT_DIR}/data/paper_titles.json" 2>/dev/null
+    python3 -c "
+import json
+d = json.load(open('${PROJECT_DIR}/data/paper_titles.json'))
+print(f'{len(d)} titles extracted')
+for k in list(d.keys())[:5]:
+    print(f'  {k} -> {d[k]!r}')
+"
+fi
+
+echo ""
+echo "Stopping Ollama server..."
+pkill ollama 2>/dev/null
+echo "✓ Server stopped"
+
+exit $EXIT_CODE

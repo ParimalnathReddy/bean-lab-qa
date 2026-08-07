@@ -42,6 +42,21 @@ def _year_from_title(title: str) -> int | None:
     return int(m.group()) if m else None
 
 
+def _doi_from_id(did: str) -> str:
+    """
+    GraphRAG document id -> DOI, same reconstruction convention used
+    everywhere else in this project (retriever.py's _filename_to_doi(),
+    prepare_graphrag_input.py's SOURCE_DOI header):
+    "10.2135_cropsci1971.0011183X001100030039x.txt" ->
+    "10.2135/cropsci1971.0011183X001100030039x"
+    """
+    name_no_ext = did[:-4] if did.endswith(".txt") else did
+    parts = name_no_ext.split("_", 1)
+    if len(parts) == 2 and parts[0].startswith("10."):
+        return f"{parts[0]}/{parts[1]}"
+    return name_no_ext
+
+
 def main():
     print("Loading parquet files...")
     docs  = pd.read_parquet(OUT_DIR / "documents.parquet")
@@ -90,15 +105,51 @@ def main():
     comm_ids = sorted(level0["community"].unique())
     comm_color = {cid: _PALETTE[i % len(_PALETTE)] for i, cid in enumerate(comm_ids)}
 
+    # ── Real paper titles (scripts/extract_paper_titles.py) ──────────────────
+    # GraphRAG's own "title" field is just the ingested filename (see that
+    # script's docstring for why a real title needs an LLM, not a heuristic).
+    # Falls back to the filename-derived title if this file doesn't exist yet
+    # or doesn't have an entry for a given paper — never a hard dependency.
+    titles_path = PROJECT / "data" / "paper_titles.json"
+    real_titles: dict = {}
+    if titles_path.exists():
+        with open(titles_path, encoding="utf-8") as f:
+            real_titles = json.load(f)
+        print(f"Loaded {len(real_titles)} extracted paper titles from {titles_path}")
+    else:
+        print(f"NOTE: {titles_path} not found — node labels will fall back to "
+              f"filenames until scripts/extract_paper_titles.py has been run")
+
     # ── Build paper nodes ─────────────────────────────────────────────────────
     print("Building paper nodes...")
     doc_id_to_idx = {did: i for i, did in enumerate(docs["id"])}
 
     nodes = []
     for _, row in docs.iterrows():
-        did  = row["id"]
-        title = str(row.get("title", "Unknown"))
-        year  = _year_from_title(title)
+        did          = row["id"]  # GraphRAG's own internal content-hash id —
+                                   # NOT the filename (verified directly: this
+                                   # is a 128-char hex string). The filename
+                                   # only ever lived in the "title" column
+                                   # (prepare_graphrag_input.py never set a
+                                   # real title, so GraphRAG's title defaulted
+                                   # to the source filename) — every filename-
+                                   # derived value below (source_file for the
+                                   # title lookup, year, DOI) MUST come from
+                                   # fallback_title, not did, or the lookups
+                                   # silently never match anything.
+        fallback_title = str(row.get("title", "Unknown"))  # filename-based
+        # real_titles is keyed by source_file (the original .pdf name from
+        # processed_chunks.json) — fallback_title is that same name with
+        # .txt instead of .pdf (see prepare_graphrag_input.py's
+        # out_filename convention).
+        source_file  = fallback_title[:-4] + ".pdf" if fallback_title.endswith(".txt") else fallback_title
+        title        = real_titles.get(source_file) or fallback_title
+        # Year and DOI are pulled from the FILENAME (fallback_title), not
+        # the real extracted title or the hash id — real paper titles
+        # essentially never contain their own publication year, and did is
+        # a content hash with no DOI information in it at all.
+        year  = _year_from_title(fallback_title)
+        doi   = _doi_from_id(fallback_title)
         comm  = doc_to_community.get(did, -1)
         color = comm_color.get(comm, "#aaaaaa")
         n_entities = len(doc_to_entities.get(did, set()))
@@ -107,6 +158,7 @@ def main():
             "id":        did,
             "label":     title[:60] + ("…" if len(title) > 60 else ""),
             "title":     title,
+            "doi":       doi,
             "year":      year,
             "community": comm,
             "comm_title":doc_to_community_title.get(did, "Uncategorised"),
