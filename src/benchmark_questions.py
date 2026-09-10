@@ -22,18 +22,32 @@ question set — no drift between them.
 
 IMPORTANT CAVEATS — read before trusting results built on this file:
 
-1. ground_truth is None for every single question. RAGAS's context_recall
-   (and the reference-based variant of context_precision) both require a
-   verified reference answer to check retrieval against — and I have no
-   access to the actual text of the 1,067 indexed papers, so I cannot
-   responsibly author 75 "ground truth" answers; anything I invented would
-   be an unverified guess dressed up as a reference. Filling these in
-   requires someone with real access to the corpus (or someone willing to
-   manually verify each answer against the source PDFs). Until populated,
-   eval_ragas.py only computes the three RAGAS metrics that don't need a
-   reference (faithfulness, answer_relevancy, and the reference-free
-   LLMContextPrecisionWithoutReference) — context_recall is reported as
-   unavailable for any question lacking ground_truth.
+1. ground_truth (Change 11): 11 of 75 questions now have it populated — all
+   7 direct_lookup and 4 of 10 cross_section questions with clean, specific
+   corpus support (DL-01, DL-03, DL-04, DL-07, DL-08, DL-09, DL-10, CS-01,
+   CS-02, CS-09, CS-10). The remaining 64 are still None, deliberately, not
+   an oversight: each populated answer was verified against real chunk text
+   pulled from data/processed_chunks.json (21,876 chunks, 964 papers) via
+   targeted keyword search — never invented from general domain knowledge —
+   and several DL/CS questions that looked promising on paper (DL-02 soil
+   pH, DL-05 herbicides, DL-06 deficit-irrigation WUE, DL-06's cousin CS-03
+   P/N-fixation, CS-04 heat x drought, CS-05 genetic vs. agronomic gains,
+   CS-06 canopy/white mold, CS-07 yield vs. market class, CS-08 Al
+   toxicity) turned up no clean, specific, bean-relevant match in this
+   corpus after real searching and were deliberately left None rather than
+   answered from outside knowledge — this crop-science-journal corpus
+   covers some agronomy-extension-style facts (optimal soil pH, herbicide
+   product names) thinly or not at all. CS-02's ground_truth is itself an
+   example of this discipline applied within a single answer: it states
+   what the retrieved maize-bean intercrop yield data actually shows and
+   explicitly notes the nitrogen-fixation angle the original question asked
+   about was NOT found in this source, rather than inventing it. The 10
+   inference/10 critique/10 multi_part/10 adversarial/15 multi_hop
+   questions were left entirely alone — untouched by this change. Where
+   ground_truth is populated, eval_ragas.py now also computes
+   context_precision and context_recall for that question, in addition to
+   the three reference-free metrics; where it's still None, only the
+   reference-free metrics run, exactly as before.
 
 2. The 25 direct_lookup/cross_section/inference/critique/multi_part questions
    beyond the original 25 (i.e. *-06 through *-10), plus all 10 adversarial
@@ -75,13 +89,17 @@ def _q(
     question: str,
     rubric: List[str],
     expect_low_confidence: bool = False,
+    ground_truth: Optional[str] = None,  # Change 11: verified against the
+    # actual indexed corpus (data/processed_chunks.json) via keyword search,
+    # not invented — see this module's docstring, item 1, for why every
+    # other question still has None here.
 ) -> BenchmarkQuestion:
     return {
         "id": id,
         "category": category,
         "question": question,
         "rubric": rubric,
-        "ground_truth": None,  # TODO: fill in from verified paper content
+        "ground_truth": ground_truth,
         "expect_low_confidence": expect_low_confidence,
     }
 
@@ -93,7 +111,17 @@ BENCHMARK: List[BenchmarkQuestion] = [
         "What nitrogen fixation rates have been reported for common bean (Phaseolus vulgaris) varieties?",
         ["specific numerical fixation rates (kg N/ha or % N derived from atmosphere)",
          "mention of Rhizobium or nodulation",
-         "at least one cultivar or experimental condition"]),
+         "at least one cultivar or experimental condition"],
+        ground_truth=(
+            "In a field comparison of 12 dry bean lines using 15N isotope methods "
+            "(St. Clair et al., Crop Science 1988), the percentage of seed nitrogen "
+            "derived from atmospheric N2 fixation (% Ndfa) ranged from 26% to 55% "
+            "for most lines, with the cultivar Sanilac a clear outlier at only about "
+            "5%. Higher N2-fixing lines had significantly more fixed N2 in their "
+            "seed, and seed yield was highly rank-correlated with plant N2 fixed "
+            "(rs = 0.98, P < 0.01), indicating N2-fixing ability and seed yield can "
+            "be improved together through selection."
+        )),
     _q("DL-02", "direct_lookup",
         "What soil pH range is considered optimal for common bean production?",
         ["pH range (typically 6.0–7.0)",
@@ -102,12 +130,35 @@ BENCHMARK: List[BenchmarkQuestion] = [
         "What are the symptoms of bean rust caused by Uromyces appendiculatus?",
         ["description of pustules or uredinia",
          "leaf or stem symptoms",
-         "mention of sporulation or color"]),
+         "mention of sporulation or color"],
+        ground_truth=(
+            "Bean rust reactions are commonly scored on the Stavely et al. (1983) "
+            "1-to-6 scale used across multiple common bean cultivar registrations: "
+            "grade 1 shows no visible symptoms; grades 2/2+ are necrotic or "
+            "chlorotic flecks under 1.0 mm without sporulation (a resistant, "
+            "hypersensitive reaction); grade 3 shows tiny sporulating uredinia "
+            "(pustules) under 0.3 mm; and grades 4 through 6 are sporulating "
+            "pustules of increasing size, from 0.3-0.5 mm up to larger than "
+            "0.8 mm in diameter, as the reaction becomes fully susceptible. "
+            "Multiple pustule sizes can occur on the same leaf."
+        )),
     _q("DL-04", "direct_lookup",
         "What seed yield advantage has been reported for indeterminate over determinate bean varieties under field conditions?",
         ["numerical yield comparison (% or kg/ha)",
          "mention of growth habit type (Type I, II, III, IV)",
-         "at least one study or environment cited"]),
+         "at least one study or environment cited"],
+        ground_truth=(
+            "In a CIAT field trial at Quilichao, Colombia comparing determinate "
+            "(Type I) with indeterminate erect (Type II) and indeterminate "
+            "prostrate (Type III) common bean, indeterminate types generally "
+            "out-yielded the determinate type across plant densities: yield of "
+            "Type I plants only approached that of Type II at the highest density "
+            "tested (30 plants/m2), while Types II and III yields were already "
+            "maximized at a lower density of about 23 plants/m2. Indeterminate "
+            "cultivars tended to compensate for yield over a wide range of plant "
+            "densities, whereas determinate cultivars increased yield per unit "
+            "area mainly by increasing density."
+        )),
     _q("DL-05", "direct_lookup",
         "What herbicides are commonly used for weed control in dry bean production?",
         ["at least two herbicide names (e.g., S-metolachlor, imazethapyr, fomesafen)",
@@ -121,34 +172,103 @@ BENCHMARK: List[BenchmarkQuestion] = [
         "What is the typical days-to-flowering range reported for determinate common bean cultivars?",
         ["numerical days-to-flowering range",
          "mention of determinate growth habit",
-         "reference to environmental or photoperiod effect"]),
+         "reference to environmental or photoperiod effect"],
+        ground_truth=(
+            "Days to flowering in common bean field trials at CIAT sites in "
+            "Colombia (Palmira and Popayan) has been observed to range from "
+            "roughly 25 to 55 days across genotypes and environments (Sexton et "
+            "al., Crop Science 1994). This variation is strongly driven by "
+            "photoperiod response: most tropical common bean landraces are "
+            "sensitive to long daylengths, delaying flowering, while some "
+            "genotypes (especially in the Mesoamerican and Andean gene pools) "
+            "are photoperiod-insensitive. Photoperiod sensitivity is controlled "
+            "by a small number of genes (often reported as one to two) whose "
+            "dominance behavior varies by genotype and test environment."
+        )),
     _q("DL-08", "direct_lookup",
         "What protein content percentages have been reported for common bean seed?",
         ["numerical protein content percentage or range",
          "mention of cultivar or genotype variation",
-         "reference to nutritional or seed quality context"]),
+         "reference to nutritional or seed quality context"],
+        ground_truth=(
+            "Seed protein content of common bean (Phaseolus vulgaris) usually "
+            "ranges from about 18% to 30% (Mutschler and Bliss, Crop Science "
+            "1981). A weak negative correlation between seed yield and protein "
+            "concentration has been reported across breeding lines, meaning "
+            "higher-protein selections tend to yield somewhat less, an important "
+            "trade-off for breeding programs targeting nutritional quality."
+        )),
     _q("DL-09", "direct_lookup",
         "What plant density or spacing recommendations have been reported for maximizing dry bean yield?",
         ["numerical plant density (plants/m2 or similar) or row spacing figure",
          "mention of planting arrangement",
-         "reference to yield outcome"]),
+         "reference to yield outcome"],
+        ground_truth=(
+            "In a CIAT field trial (Quilichao, Colombia) across three bean growth "
+            "habits, yield of indeterminate erect and prostrate types (Types II "
+            "and III) was maximized at a plant density of about 23 plants/m2, "
+            "while nodes per m2 continued increasing up to the highest density "
+            "tested, 30 plants/m2. The determinate type (Type I) only reached "
+            "yield comparable to the indeterminate types at that highest density, "
+            "consistent with determinate cultivars needing higher planting "
+            "density to maximize yield per unit area, while indeterminate types "
+            "compensate for yield over a wider range of densities."
+        )),
     _q("DL-10", "direct_lookup",
         "What symptoms characterize common bacterial blight (CBB) caused by Xanthomonas in bean leaves?",
         ["description of water-soaked lesions or leaf spots",
          "mention of leaf margin or vein symptoms",
-         "reference to bacterial ooze or angular lesions"]),
+         "reference to bacterial ooze or angular lesions"],
+        ground_truth=(
+            "Common bacterial blight, caused by Xanthomonas campestris pv. "
+            "phaseoli (and the fuscans variant), is a seed-borne bacterial "
+            "disease causing severe yield losses in dry and snap bean. On the "
+            "standard CBB rating scale used in resistance screening (van "
+            "Schoonhoven and Pastor-Corrales, 1987), symptoms progress from an "
+            "isolated small chlorotic zone around a necrotic lesion at the "
+            "inoculation site, to chlorotic zones and lesions joining together "
+            "as severity increases, to complete chlorosis of the affected leaf "
+            "area and systemic infection in fully susceptible reactions."
+        )),
 
     # ── 2. Cross-section synthesis (10) ───────────────────────────────────────
     _q("CS-01", "cross_section",
         "How has marker-assisted selection improved bean resistance to bean common mosaic virus (BCMV)?",
         ["identifies specific resistance genes or QTLs (e.g., I gene, bc-1, bc-3)",
          "describes how MAS is applied in breeding",
-         "mentions genetic diversity or gene pools"]),
+         "mentions genetic diversity or gene pools"],
+        ground_truth=(
+            "The recessive bc-3 gene confers resistance to all known strains of "
+            "Bean Common Mosaic Virus. RAPD markers linked to the bc-3 locus "
+            "(e.g., OAD1969, linked in coupling at about 1.9 cM, and OS1366, "
+            "linked in repulsion at about 7.1 cM, identified via bulked "
+            "segregant analysis) allow indirect, marker-assisted selection for "
+            "this recessive resistance allele without needing to mechanically "
+            "inoculate and progeny-test each plant against BCMV strains. "
+            "Survey work tracing the bc-3 resistance allele's evolutionary "
+            "origin placed it in the Mesoamerican gene pool. This let breeders "
+            "introgress durable, broad-spectrum BCMV resistance into elite "
+            "cultivars more efficiently than conventional inoculation-based "
+            "selection."
+        )),
     _q("CS-02", "cross_section",
         "How does intercropping common bean with maize affect bean yield and nitrogen fixation?",
         ["yield comparison (monoculture vs. intercrop)",
          "light or nutrient competition effects",
-         "nitrogen fixation change (increase or decrease with rationale)"]),
+         "nitrogen fixation change (increase or decrease with rationale)"],
+        ground_truth=(
+            "A multi-year CIAT field trial evaluating maize-bean cropping "
+            "patterns found maize yields were significantly higher in "
+            "monoculture than when intercropped with bean — 4761 kg/ha in "
+            "monoculture versus 4203 to 4324 kg/ha intercropped in the first "
+            "experiment. The bean growth type mattered: a more competitive "
+            "indeterminate climbing bean reduced maize yield more than a "
+            "determinate bush-type bean, which had comparatively limited effect "
+            "on maize yield. Retrieved sources in this corpus report yield and "
+            "competition effects of maize-bean intercropping in detail but do "
+            "not report a nitrogen-fixation-specific measurement for this "
+            "particular intercrop combination."
+        )),
     _q("CS-03", "cross_section",
         "What is the role of phosphorus availability in nitrogen fixation efficiency in common bean?",
         ["mechanism linking P to nodulation or nitrogenase activity",
@@ -183,12 +303,41 @@ BENCHMARK: List[BenchmarkQuestion] = [
         "How do pre-flowering and post-flowering drought stress differentially affect bean pod number and seed weight?",
         ["distinguishes effects at different growth stages",
          "quantitative or comparative yield component impact",
-         "reference to a specific study or trial"]),
+         "reference to a specific study or trial"],
+        ground_truth=(
+            "In dry bean, excessive abortion of flowers, young pods, and seeds "
+            "occurs from drought stress applied during pre-flowering (10 to 12 "
+            "days before anthesis) as well as during later reproductive periods, "
+            "and moderate to severe drought stress at these stages reduces "
+            "biomass, seed yield, harvest index, pod number, seed number, seed "
+            "weight, and days to maturity, with the magnitude depending on "
+            "timing and intensity of the stress. In a field trial of three "
+            "landraces and 13 cultivars under intermittent drought stress at "
+            "Kimberly, Idaho (2003-2004), mean seed yield was reduced by about "
+            "62% relative to non-stressed conditions."
+        )),
     _q("CS-10", "cross_section",
         "How has integrated pest management combining resistant varieties and insecticide use addressed whitefly-transmitted virus problems in bean?",
         ["mention of resistant variety deployment",
          "mention of insecticide or vector control practice",
-         "reference to virus (e.g., BGMV) management outcome"]),
+         "reference to virus (e.g., BGMV) management outcome"],
+        ground_truth=(
+            "Bean Golden Mosaic Virus (BGMV), transmitted by whitefly (Bemisia "
+            "tabaci and B. argentifolii), is described as the most serious "
+            "common bean disease in the lowland tropics of the Americas. The "
+            "dominant management strategy documented in this corpus is "
+            "resistant-cultivar deployment rather than insecticide-centered "
+            "control: most BGMV resistance breeding traces back to the black "
+            "bean landrace 'Porrillo Sintetico' from El Salvador, and derived "
+            "lines such as 'Dorado' (DOR 364) show quantitative resistance — "
+            "reduced yellow mosaic symptoms and superior yield. RAPD/QTL "
+            "marker-assisted selection (via bulked segregant analysis) has been "
+            "used to accelerate breeding for BGMV resistance, in some cases "
+            "combined with common bacterial blight resistance in the same "
+            "mapping populations. Retrieved sources in this corpus emphasize "
+            "genetic resistance over insecticide-based vector control as the "
+            "primary management approach."
+        )),
 
     # ── 3. Inference / cause-effect (10) ──────────────────────────────────────
     _q("IN-01", "inference",

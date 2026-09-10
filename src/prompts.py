@@ -11,7 +11,8 @@ Design principles:
   6. Citation format: doi:10.XXXX/suffix (no generic [Source N] labels)
 """
 
-from typing import List, Dict, Tuple
+import re
+from typing import List, Dict, Optional, Tuple
 
 DISTANCE_THRESHOLD = 0.85   # chunks above this are included but flagged as weak
 
@@ -228,21 +229,56 @@ def build_ollama_prompt(
     )
 
 
-def format_references(chunks: List[Dict]) -> str:
+def format_references(chunks: List[Dict], titles: Optional[Dict[str, str]] = None) -> str:
     """
     Build a clean deduplicated reference list from retrieved chunks.
     Only includes chunks below the distance threshold.
+
+    titles: optional {source_file: title} lookup — data/paper_titles.json,
+    LLM-extracted by scripts/extract_paper_titles.py (see that script's
+    docstring for why a real title needs an LLM, not a heuristic; this is
+    the same file that already powers the GraphRAG paper-graph's node
+    labels). When a chunk's source file has a known title, shows it with
+    the DOI as a trailing link: "Paper Title (doi:X)". Falls back to just
+    the DOI as the link text — the original format — for any chunk whose
+    paper isn't in the titles lookup (e.g. papers outside the 964-paper
+    GraphRAG corpus, or the ~2 that failed extraction).
     """
+    titles = titles or {}
     seen = set()
     refs = []
     for c in chunks:
         doi = c.get("doi", "")
+        source = c.get("source", "")
         dist = c.get("distance")
         dist = 1.0 if dist is None else dist
         if doi and doi not in seen:
             seen.add(doi)
             flag = " *(weak evidence)*" if dist > DISTANCE_THRESHOLD else ""
-            refs.append(f"• doi:{doi}{flag}")
+            title = titles.get(source)
+            link = f"[doi:{doi}](https://doi.org/{doi})"
+            refs.append(f"• {title} ({link}){flag}" if title else f"• {link}{flag}")
     if not refs:
         return ""
     return "**References:**\n" + "\n".join(refs)
+
+
+# Inline citations follow CITATION RULES above: (doi:10.XXXX/suffix, p.N),
+# deliberately NOT [1]/[2]/[Source N] — see commit 41393b5, which forbade
+# numbered references specifically because an LLM can mislabel or invent a
+# bracket number with no real chunk behind it, while a DOI it writes is
+# always one it actually saw in the retrieved context. This function does
+# NOT touch that — it's a pure display transform, applied to the model's
+# output after generation, turning the raw "(doi:X, p.N)" text a user can't
+# click into an actual link they can, without changing what gets cited or
+# how the LLM decides to cite it.
+_INLINE_CITATION_RE = re.compile(r"\(doi:([^,\)]+),\s*p\.(\d+)\)")
+
+
+def linkify_citations(answer: str) -> str:
+    """
+    (doi:10.2135/cropsci2004.1901, p.14) -> ([p.14](https://doi.org/10.2135/cropsci2004.1901))
+    Leaves the text unchanged if it doesn't match this exact pattern (e.g. a
+    citation format the LLM didn't quite follow) rather than risk mangling it.
+    """
+    return _INLINE_CITATION_RE.sub(r"([p.\2](https://doi.org/\1))", answer)

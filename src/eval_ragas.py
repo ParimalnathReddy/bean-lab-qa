@@ -7,7 +7,7 @@ Runs the SAME BeanRetriever + Ollama generation pipeline as qa_with_ollama.py
 prompting — nothing about the production path is reimplemented here) against
 the shared 75-question benchmark in benchmark_questions.py, then scores each
 (question, answer, retrieved_contexts) triple with RAGAS metrics judged by an
-LLM — Gemini 2.0 Flash by default, free tier — instead of eval_qa.py's coarse
+LLM — Gemini 2.5 Flash by default — instead of eval_qa.py's coarse
 keyword-rubric matching.
 
 Metrics computed:
@@ -22,18 +22,23 @@ Metrics computed:
                              reference. Runs on every question.
   context_precision          The reference-based variant of the above. Only
                              computed for questions with ground_truth filled
-                             in benchmark_questions.py — currently none (see
-                             that module's docstring for why).
+                             in benchmark_questions.py — 11 of 75 as of
+                             Change 11 (see that module's docstring, item 1,
+                             for exactly which and why not more).
   context_recall             Did retrieval capture everything needed to
                              answer? REQUIRES a ground_truth reference answer.
-                             Same "currently none populated" caveat applies.
+                             Same 11/75 coverage as context_precision above.
 
 Why context_precision_no_ref instead of forcing a ground truth everywhere:
-authoring 75 reference answers without verified access to the actual paper
-text would mean grading retrieval against invented facts — worse than no
-context_recall at all. Once someone with real corpus access fills in
-ground_truth fields, context_precision/context_recall activate automatically
-for those questions, no code changes needed.
+authoring reference answers without verified access to the actual paper text
+would mean grading retrieval against invented facts — worse than no
+context_recall at all. Change 11 populated ground_truth for 11 questions by
+searching data/processed_chunks.json directly and using only what real chunk
+text actually supported (see benchmark_questions.py's docstring); the other
+64 remain None precisely because that same search came up empty or unclear
+for them, not because no one got around to it. Whenever more get filled in
+the same verified way, context_precision/context_recall activate
+automatically for those questions, no code changes needed here.
 
 Dependency note: ragas + langchain-google-genai + langchain-community is a
 version-sensitive combination — pin to the set in requirements.txt
@@ -56,7 +61,7 @@ Optional flags:
     --n-candidates     Candidates to retrieve before reranking (default: 20)
     --categories       Run only these categories (e.g. adversarial multi_hop)
     --limit            Cap number of questions (smoke-testing)
-    --gemini-model     Judge model (default: gemini-2.0-flash)
+    --gemini-model     Judge model (default: gemini-2.5-flash)
     --embedding-model  Embedding model for answer_relevancy (default: matches
                        the production system, BAAI/bge-large-en-v1.5)
 """
@@ -140,7 +145,7 @@ def main():
     parser.add_argument("--categories", nargs="*",
                         help="Run only these categories (e.g. adversarial multi_hop)")
     parser.add_argument("--limit", type=int, help="Cap number of questions (smoke test)")
-    parser.add_argument("--gemini-model", default="gemini-2.0-flash")
+    parser.add_argument("--gemini-model", default=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip())
     parser.add_argument("--embedding-model", default="BAAI/bge-large-en-v1.5")
     args = parser.parse_args()
 
