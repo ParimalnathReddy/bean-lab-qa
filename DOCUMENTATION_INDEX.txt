@@ -5,9 +5,118 @@
   Deployment: HuggingFace Spaces  →  Parimalanath/bean-lab-qa
   Dataset Repo: HuggingFace Datasets  →  Parimalanath/bean-lab-vector-db
   Created: April 4, 2026
-  Last Updated: August 3, 2026 — covers Changes 1-8 (embedding upgrade,
+  Last Updated: August 7, 2026 — covers Changes 1-17 (embedding upgrade,
     hybrid retrieval, faithfulness verification, RAGAS evaluation, gene
-    validation, structured data layer, query router, conversation memory)
+    validation, structured data layer, query router, conversation memory,
+    GraphRAG global query mode, chat-history sidebar + graph/reference UI
+    polish, faithfulness/gene validation extended to global mode, RAGAS
+    ground_truth answers for 11 questions, unifying the query router and
+    GraphRAG mode detection into one decision point, then replacing
+    keyword-based mode detection with confidence-based escalation, a
+    per-paper structured metadata index for DOI/year/species/methodology
+    filtering, a bounded pre-generation gap-check loop, syncing
+    deploy/app.py's answer-quality safety checks toward hf_space/app.py's
+    parity, and finally wiring that per-paper metadata index into query
+    routing so it's actually reachable from a real question) plus the
+    infrastructure incidents that followed — see STATUS below and
+    ERRORS 17-21.
+
+STATUS AS OF AUGUST 7, 2026 — READ BEFORE TRUSTING "IT WORKS" ELSEWHERE IN
+THIS FILE:
+  The August 5 dimension-mismatch outage (ERROR 18/19) is RESOLVED, not
+  in-progress: data/embeddings.npy was regenerated at 1024-dim
+  (BAAI/bge-large-en-v1.5, generation_date 2026-08-05T16:16), and
+  build_vector_store.sb was re-run against it the same day — confirmed by
+  vector_db/database_statistics.json (creation_date 2026-08-05T17:01,
+  embedding_dimension: 1024, 21876 chunks, 964 unique sources) and by the
+  Parimalanath/bean-lab-vector-db HF dataset repo's git log (commit
+  b3a37af, "Rebuild vector store at correct 1024-dim", Aug 5 17:05,
+  followed by ce1c45d merging in community_reports/paper_graph and 6c403bf
+  adding community_embeddings.npy, Aug 5 17:07-17:20). The live Space has
+  been serving real retrieval-backed answers since. Since then, nine more
+  commits landed on hf_space/app.py (Aug 5 18:00 - Aug 7 00:35, see the
+  "UI POLISH" entry under STEP 10's Gradio UI section, Change 10 / STEP 20,
+  and ERRORS 20-21): four small same-day UI/contrast fixes (light theme,
+  empty graph panel showing as a ghost box, invisible placeholder text,
+  clickable citations), the real root cause of the "can't type in the chat
+  box" symptom ERROR 18 flagged as unconfirmed (it WAS a distinct bug — see
+  ERROR 20), the GraphRAG graph panel's "Stabilizing... 0%" hang,
+  click-to-open-paper on graph nodes, real paper titles in the References
+  list, and a ChatGPT-style chat-history sidebar. The last four (Aug 6-7)
+  were verified locally with headless-browser (Playwright) testing before
+  being pushed to the live Space — a deliberate change adopted after
+  ERROR 20 (see ERROR 21 for the Gradio quirks that made it necessary).
+  Three more changes landed after that: Change 9a extended the faithfulness
+  and gene-validation checks (Changes 3/5) to GraphRAG global mode, closing
+  a gap STEP 19 used to flag directly as unaddressed (see STEP 19's Change
+  9a entry); Change 11 populated real, corpus-verified ground_truth answers
+  for 11 of the 75 RAGAS benchmark questions (see STEP 14), unlocking
+  context_precision/context_recall for those questions for the first time;
+  and Change 12 unified query_router.py's route() with hf_space/app.py's
+  formerly-standalone _is_global() into one call producing one decision
+  object (mode + literature/structured-data/gene flags together, see STEP
+  17's Change 12 section) — hf_space/app.py's chat() now calls route()
+  exactly once per question instead of two uncoordinated routing decisions.
+  One more change landed after that: Change 13 replaced Change 12's
+  keyword-based mode decision with a confidence-based one — chat() now runs
+  local retrieval unconditionally first (cheap: no LLM call) and escalates
+  to GraphRAG global mode only when assess_confidence()'s label comes back
+  below SUPPORTED, instead of guessing from _GLOBAL_SIGNALS keywords before
+  ever retrieving anything (see STEP 19's Change 13 section). Verified
+  against the real vector_db before shipping — not just synthetic fixtures
+  — using 23 queries with independently-known corpus coverage (Change 11):
+  confirmed-covered questions stay local 82% of the time, confirmed-thin
+  questions now escalate 67% of the time versus 11% under the originally-
+  considered "escalate on UNSUPPORTED alone" design. Most recently, Change
+  14 (note: unrelated to, and not to be confused with, "STEP 14" — the
+  RAGAS Evaluation Pipeline entry elsewhere in this TOC; the two numbering
+  systems collided by coincidence) added a second small SQLite table, ONE
+  ROW PER PAPER (962), for filtering by DOI/year/species/methodology as
+  first-class fields — see STEP 16's Change 14 section for the full
+  writeup, including a real year-extraction bug this surfaced and fixed
+  (a GraphRAG-computed year of 2038 for an actual 2024 paper) and honestly-
+  measured coverage numbers for the rule-based species/methodology tags.
+  Standalone data layer only, same scope Change 6 drew for itself — not
+  yet wired into the live query pipeline, and not yet uploaded to the HF
+  dataset repo. Change 15 added a bounded Self-RAG gap-check loop — before
+  generation (not after, like STEP 13's original faithfulness check),
+  chat() now asks a cheap Gemini call whether local retrieval actually
+  found enough to answer the question, reformulating and retrying up to 2
+  times when it hasn't, BEFORE Change 13's escalation decision ever runs
+  (see STEP 19's Change 15 section — a refinement layer underneath Change
+  13, deliberately not a second competing decision point beside it).
+  Verified with an 8-case isolated test against the real functions
+  (confirmed verbatim via ast, not eyeballed) covering iteration capping,
+  early exits, and soft-fail behavior — including a None-distance-chunk
+  case added after review caught it missing from the original 7 — then
+  confirmed live on the deployed Space itself after this push rebuilt
+  successfully. Most recently, Change 16 synced deploy/app.py's answer-
+  quality safety checks toward hf_space/app.py's: gene-validation footer,
+  faithfulness check, and the gap-check loop, the latter two via a NEW
+  Gemini dependency rather than reusing deploy/app.py's single Qwen model
+  (see STEP 13's Change 16 section — reusing Qwen would have doubled load
+  on the one quota this app has, undermining why these checks are "cheap"
+  in the first place). Deliberately did NOT port conversation memory or
+  GraphRAG — both are real, separate work, not same-size-as-gene-
+  validation quick ports, confirmed by tracing what deploy/app.py's UI
+  actually supports before deciding, not assumed. Also corrected two
+  pre-existing inaccuracies this investigation surfaced in this very file
+  (a repo-tree comment claiming deploy/app.py "automatically gets... the
+  query router" — it never imported query_router.py at all — and a STEP 17
+  passage implying its out-of-scope gate already checked structured data
+  first, which it never did, since structured_data.py wasn't imported
+  either) and one stale signature reference in STEP 13 predating this
+  change (_verify_faithfulness(chunks, answer), never updated when
+  Change 9a changed it to context: str). Most recently, Change 17 answered
+  a direct "why isn't this wired in" question about Change 14 by actually
+  wiring it in: query_router.py now detects species/methodology/year-
+  filter intent (reusing the same real-vocabulary-cache matching already
+  used for cultivar/location/trait, plus a new open-ended-year regex for
+  "papers from 2015+" style phrasing) and routes it into
+  paper_metadata.query_papers(), and vector_db/paper_metadata.db has been
+  uploaded to the dataset repo — see STEP 17's Change 17 section. The
+  worked example from Change 14 now genuinely resolves end to end, not
+  just at the database layer.
 ================================================================================
 
 TABLE OF CONTENTS
@@ -30,14 +139,19 @@ TABLE OF CONTENTS
   16. STEP 13 — Faithfulness Verification / Self-RAG Lite  (Change 3)
   17. STEP 14 — RAGAS Evaluation Pipeline  (Change 4, src/eval_ragas.py)
   18. STEP 15 — Gene/Locus Validation  (Change 5, src/gene_validator.py)
-  19. STEP 16 — Structured Trial-Data Layer  (Change 6, src/structured_data.py)
+  19. STEP 16 — Structured Trial-Data Layer  (Change 6, src/structured_data.py;
+      + Change 14, per-paper structured metadata index)
   20. STEP 17 — Query Router  (Change 7, src/query_router.py)
   21. STEP 18 — Conversation Memory  (Change 8, hf_space/app.py + prompts.py)
-  22. Key Errors Encountered and How They Were Fixed
-  23. SLURM Job Scripts Reference  (jobs/)
-  24. Conda Environment & Python Dependencies
-  25. API Keys & Secrets Reference
-  26. How to Re-Run Everything from Scratch
+  22. STEP 19 — GraphRAG Global Query Mode  (Change 9, scripts/;
+      + Change 9a, faithfulness/gene validation for global mode)
+  23. STEP 20 — Chat History Sidebar + Graph/Reference UI Polish
+      (Change 10, hf_space/app.py + prompts.py)
+  24. Key Errors Encountered and How They Were Fixed
+  25. SLURM Job Scripts Reference  (jobs/)
+  26. Conda Environment & Python Dependencies
+  27. API Keys & Secrets Reference
+  28. How to Re-Run Everything from Scratch
 
 
 ================================================================================
@@ -205,13 +319,33 @@ hpcc-llm-qa/
 │
 ├── deploy/                          Simpler standalone Gradio app (not the
 │   │                                 live Space) — single Qwen model via HF
-│   │                                 InferenceClient, no Gemini waterfall, no
-│   │                                 faithfulness check or gene-validation
-│   │                                 footer wired in (see STEP 10)
-│   ├── app.py                       Standalone app, imports from ../src directly
-│   │                                 (so it automatically gets hybrid retrieval,
-│   │                                 the query router, etc. — no separate copies
-│   │                                 needed the way hf_space/ requires)
+│   │                                 InferenceClient, no Gemini 4-tier
+│   │                                 waterfall. As of Change 16: DOES have
+│   │                                 faithfulness check + gene-validation
+│   │                                 footer + the gap-check loop (via a
+│   │                                 dedicated Gemini key, separate from
+│   │                                 Qwen — see STEP 19/13's Change 16
+│   │                                 sections). Still does NOT have
+│   │                                 GraphRAG or conversation memory —
+│   │                                 deliberately out of scope, see below.
+│   ├── app.py                       Standalone app, imports retriever.py and
+│   │                                 prompts.py from ../src directly (so it
+│   │                                 automatically gets hybrid retrieval and
+│   │                                 evidence-first prompting, no separate
+│   │                                 copies needed the way hf_space/
+│   │                                 requires) — but NOT query_router.py,
+│   │                                 gene_validator.py, or structured_data.py:
+│   │                                 those need an explicit import that
+│   │                                 was never added, confirmed directly
+│   │                                 (Change 16), correcting this comment's
+│   │                                 own former claim that all of src/'s
+│   │                                 features came along automatically.
+│   │                                 gene_validator IS now imported as of
+│   │                                 Change 16, specifically and only for
+│   │                                 the gene-validation footer — routing
+│   │                                 flags from query_router/structured_data
+│   │                                 remain unported (no UI concept here to
+│   │                                 hang them on, e.g. no chat history).
 │   └── requirements.txt
 │
 ├── data/
@@ -225,10 +359,20 @@ hpcc-llm-qa/
 │   └── checkpoint_*.json            Intermediate checkpoints from PDF processing
 │
 ├── vector_db/                       Everything the online app downloads as one
-│   │                                 unit via snapshot_download — all 4 files
-│   │                                 below travel together through the same
-│   │                                 HF Dataset repo with zero extra app.py logic
-│   ├── chroma.sqlite3               ChromaDB index + metadata (main file)
+│   │                                 unit via snapshot_download — every file
+│   │                                 below travels together through the same
+│   │                                 HF Dataset repo with zero extra app.py logic.
+│   │                                 NOTE: community_reports.json, paper_graph.json,
+│   │                                 and community_embeddings.npy (Change 9) are
+│   │                                 produced in graphrag_workspace/output/, not
+│   │                                 here — they get uploaded straight into
+│   │                                 hf_dataset_upload/ alongside whatever's
+│   │                                 copied from this folder, so they end up in
+│   │                                 the SAME flat HF dataset repo even though
+│   │                                 they never sit in this local directory.
+│   ├── chroma.sqlite3               ChromaDB index + metadata (main file) — ⚠ as
+│   │                                 of Aug 5, 2026 this is STALE 384-dim data,
+│   │                                 see ERROR 18 / STATUS note at top of file
 │   ├── *.bin                        HNSW graph binary files (fast ANN search)
 │   ├── bm25_index.pkl               BM25 keyword index for hybrid retrieval
 │   │                                 (Change 2 — built by build_vector_store.py,
@@ -250,16 +394,29 @@ hpcc-llm-qa/
 │   │                                 needs GPU + Ollama)
 │   ├── run_ollama_qa.sb             sbatch: batch QA via Ollama (routes +
 │   │                                 gene-validates automatically, Change 7)
-│   └── run_ragas_eval.sb            sbatch: RAGAS evaluation (Change 4, needs
-│                                     GPU + Ollama + a Gemini API key)
+│   ├── run_ragas_eval.sb            sbatch: RAGAS evaluation (Change 4, needs
+│   │                                 GPU + Ollama + a Gemini API key)
+│   └── build_graphrag.sb            sbatch: GraphRAG indexing pipeline
+│                                     (Change 9, fully local via Ollama —
+│                                     llama3.1:8b + nomic-embed-text, no API
+│                                     keys, up to 4 days, see STEP 19)
 │
-├── scripts/                         Utility shell scripts
+├── scripts/                         Utility shell scripts + GraphRAG build steps
 │   ├── analyze_and_copy_pdfs.sh     Find PDFs, copy to data/pdfs/
 │   ├── setup_pdf_processing.sh      Install PyPDF2, pytesseract etc.
 │   ├── setup_ollama.sh              Download and install Ollama
 │   ├── download_llama_model.sh      Pull llama3.1:8b via ollama pull
 │   ├── start_ollama.sh              Start Ollama server on a compute node
-│   └── test_ollama.sh               Sanity check: query local Ollama
+│   ├── test_ollama.sh               Sanity check: query local Ollama
+│   ├── prepare_graphrag_input.py    Change 9: processed_chunks.json → the
+│   │                                 per-document text files graphrag expects
+│   ├── export_graphrag_summaries.py Change 9: community_reports.parquet →
+│   │                                 community_reports.json (uploaded to HF)
+│   ├── build_paper_graph.py         Change 9: builds paper_graph.json (nodes/
+│   │                                 edges for the pyvis visualization)
+│   └── embed_community_reports.py   Change 9: precomputes
+│                                     community_embeddings.npy offline — see
+│                                     ERROR 17 for why this exists at all
 │
 ├── config/
 │   └── HPCC_SETUP_GUIDE.md          Step-by-step HPCC first-time setup guide
@@ -267,13 +424,26 @@ hpcc-llm-qa/
 ├── logs/                            All SLURM and pipeline log files (NOT in git)
 ├── models/                          Ollama model storage (NOT in git)
 │
+├── graphrag_workspace/               GraphRAG indexing working directory
+│   │                                 (Change 9, NOT in git — 3.5GB+, see
+│   │                                 .gitignore) — output/ is what
+│   │                                 export_graphrag_summaries.py,
+│   │                                 build_paper_graph.py, and
+│   │                                 embed_community_reports.py all read
+│   │                                 from and write to
+│   ├── cache/                       graphrag's own resumable cache
+│   └── output/                      community_reports.parquet (local only),
+│                                     community_reports.json, paper_graph.json,
+│                                     community_embeddings.npy — the last
+│                                     three get uploaded to the HF dataset repo
+│
 ├── hf_dataset_upload/               Local clone of the HF Dataset repo
 │                                    (used to push vector_db/ to HF)
 │
 ├── requirements.txt                 Python dependencies for HPCC environment —
 │                                    now includes rank-bm25 (Change 2) and a
 │                                    tightly-pinned ragas/langchain stack
-│                                    (Change 4, see STEP 23 for why)
+│                                    (Change 4, see STEP 26 for why)
 ├── DOCUMENTATION_INDEX.txt          THIS FILE
 ├── HYBRID_RAG_UPGRADE.md            Rewritten for Change 2's actual (automatic,
 │                                    RRF-based) hybrid system — the version you
@@ -319,13 +489,13 @@ CONDA ENVIRONMENT
     source "${CONDA_BASE}/etc/profile.d/conda.sh"
     conda activate bean_llm
 
-  Key packages installed (see STEP 23 for the full, current list):
+  Key packages installed (see STEP 26 for the full, current list):
     PyPDF2, pytesseract, pdf2image, tiktoken — PDF processing
     sentence-transformers, torch, transformers — embeddings + cross-encoder
     chromadb — vector database
     rank-bm25 — keyword search (Change 2)
     ragas, langchain-community, langchain-google-genai — RAGAS evaluation
-      (Change 4 — tightly pinned, see STEP 23, this combination is fragile)
+      (Change 4 — tightly pinned, see STEP 26, this combination is fragile)
     tqdm, numpy — utilities
 
   CRITICAL BUG FIX: transformers vs huggingface-hub conflict
@@ -334,6 +504,18 @@ CONDA ENVIRONMENT
     an incompatibility error because the old version required huggingface-hub<0.24.
     Fix: upgrade transformers to >=4.46.0 which is compatible:
       conda run -n bean_llm pip install "transformers>=4.46.0"
+
+  ⚠ BROKEN AS OF AUGUST 5, 2026 (see ERROR 19): bean_llm's own python3 binary
+    is a dangling symlink — the environment directory still exists at the
+    path above but cannot execute Python at all. jobs/generate_embeddings.sb
+    was switched to activate a different, working environment instead:
+      /mnt/home/kodumuru/.conda/envs/ptgpu
+    (already had torch+CUDA; sentence-transformers/chromadb/rank-bm25 were
+    added to it). jobs/build_vector_store.sb has NOT yet been switched — it
+    will hit the same failure until it is (see STATUS note at top of file).
+    Everywhere else in this document that says "bean_llm," assume that means
+    ptgpu for any job actually run after August 5, 2026, until bean_llm is
+    repaired/recreated and this note is removed.
 
 MODULES
   HPCC uses the "module" system to load system-level libraries:
@@ -350,7 +532,7 @@ COMPUTE NODES
   Interactive development:
     ssh dev-amd20-v100              — gives a shell on a node with a V100 GPU
 
-  Batch jobs (see STEP 22 for the full current list):
+  Batch jobs (see STEP 25 for the full current list):
     sbatch jobs/generate_embeddings.sb
     sbatch jobs/build_vector_store.sb
     squeue -u $USER                 — check job status
@@ -991,12 +1173,28 @@ FILE: src/prompts.py (kept identical to hf_space/prompts.py on every change)
   same way (before RETRIEVED SOURCES).
 
 --- FORMAT_REFERENCES() ---
-  format_references(chunks) generates the reference list shown below the answer:
+  format_references(chunks, titles=None) generates the reference list shown
+  below the answer. UPDATED (Change 10, STEP 20): takes an optional
+  `titles: {source_file: title}` lookup (data/paper_titles.json,
+  LLM-extracted by scripts/extract_paper_titles.py — the same lookup that
+  powers the GraphRAG paper-graph's node labels, Change 9). When a chunk's
+  source paper has a known title, it's now shown as the link text instead
+  of a bare DOI:
     **References:**
-    • doi:10.2135/cropsci2004.1799
+    • Genetic mapping of resistance loci in common bean (doi:10.2135/cropsci2004.1799)
     • doi:10.1007/s00122-020-03567-8 *(weak evidence)*
+  (second entry falls back to the original bare-DOI format — its paper
+  isn't in the titles lookup, e.g. outside the 964-paper GraphRAG corpus).
   Deduplicates by DOI — each paper appears only once even if multiple chunks
   from it were retrieved. Same None-distance safety fix as build_context().
+
+  Separately, linkify_citations(answer) (also prompts.py, both copies) turns
+  the LLM's inline "(doi:X, p.N)" citations (see CITATION RULES above —
+  deliberately not [1]/[2], since a DOI the model writes is always one it
+  actually saw in context, while a bracket number can be invented) into a
+  clickable "([p.N](https://doi.org/X))" — applied to the model's output
+  after generation, a pure display transform that doesn't change what gets
+  cited or how the LLM decides to cite it.
 
 
 ================================================================================
@@ -1095,10 +1293,13 @@ FILE: src/benchmark_questions.py (the question bank — Change 4, SHARED with
   DL-06 through MH-15 (everything beyond the original 25) were authored in
   the same style/domain as the originals but NOT verified against actual
   corpus content — they may turn out to be unanswerable from what's actually
-  indexed. ground_truth is None for every single question (needed for RAGAS's
-  context_recall, STEP 14) — this was a deliberate choice, not an oversight:
-  fabricating 75 reference answers without verified access to the papers
-  would produce evaluation numbers that look rigorous but rest on guesses.
+  indexed. ground_truth (needed for RAGAS's context_recall, STEP 14) was
+  None for every question until Change 11, which populated 11 of 75 by
+  actually searching data/processed_chunks.json for real supporting text —
+  see STEP 14's entry for exactly which and the module docstring for the
+  full per-question rationale. Fabricating the other 64 without verified
+  access to the papers would produce evaluation numbers that look rigorous
+  but rest on guesses, so they remain None deliberately.
 
 SCORING (score_answer function, src/eval_qa.py):
   rubric_coverage — fraction of rubric keywords found in the answer text
@@ -1287,7 +1488,7 @@ hf_space/query_router.py    — identical copy of src/query_router.py (Change 7)
     Primary because Google gives 1,000,000 tokens/minute free. Also the
     model used directly (bypassing the rest of the waterfall) for the
     faithfulness check (STEP 13) and as the RAGAS judge LLM (STEP 14) — see
-    STEP 24 for why those two calls use Gemini specifically, not call_llm().
+    STEP 26 for why those two calls use Gemini specifically, not call_llm().
     Uses direct requests.post() to:
       https://generativelanguage.googleapis.com/v1beta/models/
       gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}
@@ -1342,6 +1543,34 @@ hf_space/query_router.py    — identical copy of src/query_router.py (Change 7)
   demo.launch(ssr_mode=False)
     ssr_mode=False is critical — SSR (server-side rendering) caused HF's health
     check endpoint to hang, keeping the Space in "Building" state forever.
+
+  UI POLISH, Aug 5 18:00-18:42 (four small commits, done the same day as the
+  embedding-dimension outage, ERROR 18/19, but after this doc's prior
+  update — see STATUS at the top of this file):
+    - #graph-out (the pyvis panel) was rendering as a visible empty
+      bordered box above the input on every "local"-mode question (most of
+      them), since Gradio still renders its wrapper <div> even with no
+      content. A CSS :empty rule was tried first and didn't work — Gradio
+      wraps the HTML value in a non-empty inner wrapper even when the value
+      itself is "". Fixed at the root instead: chat()'s _HIDE_GRAPH now
+      uses gr.update(value="", visible=False) — explicit visible=False, not
+      just an empty value — since Gradio's per-component state otherwise
+      persists visible=True from a prior global-mode answer into a later
+      local-mode one.
+    - Switched from dark to a light theme (warm off-white background, white
+      panels, dark forest-green accent chosen for ~5:1 contrast), including
+      hardcoded colors CSS variables didn't reach (topnav, assistant
+      message text, status pill, pyvis's own bgcolor/font_color/node
+      colors).
+    - That theme switch initially left placeholder text and box borders
+      barely legible (--subtle was ~2.7:1 contrast on the new white
+      background — fine on dark, nearly invisible on light) — darkened
+      --subtle and --line to ~5:1 contrast and gave the message textbox a
+      stronger border + shadow so it visibly reads as the input field.
+    - linkify_citations() (prompts.py, both copies — see STEP 7's
+      FORMAT_REFERENCES() entry) turns inline "(doi:X, p.N)" citations and
+      reference-list links into clickable links; .chatbot .bot a styling
+      added since this was the first time answers rendered links at all.
 
 --- API KEYS CONFIGURATION ---
   Set in HuggingFace Space Settings → Variables and Secrets:
@@ -1497,12 +1726,20 @@ CONCEPT: The system generates an answer and, until Change 3, simply trusted
   retrieved context — a second LLM call, done cheaply, can catch cases where
   it didn't.
 
-FILE: hf_space/app.py (NOT deployed to deploy/app.py or the HPCC batch path
-  — this is specifically a Space-side feature; ask if you want it added
-  elsewhere)
+FILE: hf_space/app.py originally (Change 3); ALSO deploy/app.py as of
+  Change 16 (see that section below) — still NOT the HPCC batch path
+  (qa_with_ollama.py/eval_qa.py/eval_ragas.py), which asks each benchmark
+  question independently by design and was never in scope for this.
 
-HOW IT WORKS: _verify_faithfulness(chunks, answer)
-  1. Builds a prompt: "Given these source passages: {build_context(chunks)}
+HOW IT WORKS: _verify_faithfulness(context, answer) — STALE HERE UNTIL NOW:
+  this used to read _verify_faithfulness(chunks, answer); Change 9a
+  refactored the parameter to plain context: str so the SAME function could
+  serve both hf_space/app.py's local mode (build_context(chunks)) and
+  global mode (the community-summary string) without local mode's chunk
+  list leaking into a function that has no reason to know chunk internals
+  — see STEP 19's Change 9a section for the full reasoning. This doc's own
+  STEP 13 text was never updated to match at the time; fixed here.
+  1. Builds a prompt: "Given these source passages: {context}
      ... And this generated answer: {answer} ... For each factual claim,
      determine SUPPORTED / UNSUPPORTED / CONTRADICTED ... Return ONLY a JSON
      object: {"claims": [{"text": ..., "verdict": ...}]}"
@@ -1534,6 +1771,110 @@ COST NOTE: the original estimate was ~500 tokens per check. Realistically,
 INTEGRATION POINT: chat()'s local-mode branch, after the LLM generates
   `answer` and before building `full_answer` — see STEP 10.
 
+── CHANGE 16: SYNCING deploy/app.py's SAFETY CHECKS (deploy/app.py,
+  deploy/requirements.txt) — answers STEP 13's own long-standing "ask if
+  you want it added elsewhere" ──
+  INVESTIGATION FIRST, before writing anything (same discipline as every
+  Change since 12): traced deploy/app.py's actual imports rather than
+  trusting what this doc already claimed about it — and found the doc was
+  WRONG in two places, both corrected as part of this change (see the repo
+  tree comment near the top of this file, and STEP 17's Change 7
+  integration note, both now marked CORRECTED). deploy/app.py imports
+  retriever.py and prompts.py from ../src/ directly and so gets Change 2's
+  hybrid retrieval and evidence-first prompting for free — but it imports
+  NEITHER query_router.py NOR gene_validator.py NOR structured_data.py,
+  confirmed by grepping every import line, not assumed from "it imports
+  from src/ so it probably gets everything." Zero faithfulness check, zero
+  gene footer, zero structured data, zero GraphRAG, zero conversation
+  memory, zero gap-check loop existed here before this change — a wider
+  gap than "just hasn't been synced yet" suggested, closer to "still at
+  the feature level right after the original build."
+
+  SCOPE DECISION, written down before implementation:
+    PORTED: gene-validation footer (Change 5) — confirmed cost-free (regex
+      + dict lookup, no LLM call, no new dependency) before deciding this
+      was a straightforward yes. Faithfulness check (Change 3) and the
+      gap-check loop (Change 15) — see the Gemini-vs-Qwen decision below,
+      the one genuine fork in this change.
+    NOT PORTED, deliberately, not by default: conversation memory (Change
+      8) and GraphRAG global mode (Change 9/12/13). Both are real,
+      separate work, not "the same size as gene validation just skipped
+      for now": deploy/app.py's UI is a single-shot Textbox→Textbox form
+      with no gr.Chatbot and no session concept at all — conversation
+      memory means restructuring the UI, not adding a session dict.
+      GraphRAG needs three data artifacts (community_reports.json,
+      community_embeddings.npy, paper_graph.json) this app doesn't
+      download today, plus a graph-rendering panel its UI doesn't have.
+
+  THE GEMINI-VS-QWEN FORK: _verify_faithfulness() and the gap-check loop
+    both call Gemini DIRECTLY rather than through a waterfall, specifically
+    so a cheap secondary check never competes with the primary answer for
+    the same scarce quota (STEP 13's own COST NOTE above). deploy/app.py
+    has exactly one provider (Qwen via HF InferenceClient) and no Gemini
+    key at all — three options existed: (a) add Gemini as a genuinely new
+    dependency, a second required-if-you-want-it secret; (b) reuse Qwen for
+    the check too, at 2x LLM-call cost against the ONE quota this app has;
+    (c) skip both checks, leave deploy/app.py as faithfulness/gap-check-
+    free. Chose (a): reusing Qwen (option b) would have undermined the
+    exact reasoning that made these checks "cheap" in the first place —
+    doubling load on the only quota this app has is a real cost, not a
+    free port. Implemented so option (a) degrades to option (c)'s behavior
+    automatically when unconfigured: GEMINI_API_KEY unset means both checks
+    soft-fail to no-op, exactly like hf_space/app.py already does when
+    Gemini itself is unreachable — this app works identically to its
+    pre-Change-16 self if the new secret is simply never added.
+
+  IMPLEMENTATION: deploy/app.py gained its own copies of _call_gemini(),
+    _verify_faithfulness(), _verify_gene_mentions(), _SUFFICIENCY_PROMPT,
+    _check_context_sufficiency(), and _gap_check_retrieve() — verbatim
+    logic from hf_space/app.py's versions, NOT a shared module extraction.
+    Deliberate, not an oversight: hf_space/app.py's versions are already
+    live, tested, and verified on production traffic (Change 13/15's live
+    gradio_client verification) — refactoring that working code into a
+    shared module purely for DRY, when Change 16 only asked to sync
+    deploy/app.py, would be real, unrequested risk to the live Space for a
+    maintenance-only win. Follows this project's own existing (if
+    imperfect) precedent of app.py files keeping their own copies of
+    app-specific orchestration logic (NO_MATCH_THRESHOLD/_out_of_scope()
+    already duplicated this way, per ERROR 14). One real difference from
+    the hf_space/app.py version: _gap_check_retrieve() here takes an
+    explicit `year_range` parameter and threads it through to the
+    reformulated retrieval call, since deploy/app.py's retrieve() (unlike
+    hf_space/app.py's) is parameterized by the UI's year-filter dropdown —
+    silently dropping that filter on a retry would be a real, if subtle,
+    regression the hf_space/app.py version never had to consider. Faithfulness
+    warning and gene footer are appended to `answer`, not `references` —
+    same placement as hf_space/app.py. answer_output switched from
+    gr.Textbox to gr.Markdown (with a matching CSS rule swap, since the old
+    `#answer-box textarea` selector matches nothing on a Markdown
+    component) so the new footers' markdown (**bold**, bullet lists)
+    actually renders instead of showing literal asterisks — a necessary
+    consequence of the new content, not unrelated scope creep. One
+    accepted limitation, stated plainly rather than silently absorbed:
+    answer_question() is a PLAIN function, not a generator like
+    hf_space/app.py's chat() — there is no way to show a "Refining
+    search..."-equivalent status message while the gap-check loop runs;
+    the added latency (up to 2 extra Gemini round-trips and 2 extra
+    retrieval calls) is real but invisible until the final answer appears.
+    deploy/requirements.txt gained `requests` (Gemini's REST calls);
+    gene_validator.py needed no new dependency (its NCBI/UniProt
+    validation happens offline via build_gene_index.py, read here from a
+    local pickle at runtime, confirmed by checking gene_validator.py's own
+    imports — stdlib only, no requests/urllib).
+
+  VERIFIED before considering this done: syntax checks throughout. An
+    isolated test suite (4 cases) covering: year_range threading through
+    correctly on a reformulated retrieval call (both a real filter value
+    and None/"All years", neither silently dropped or coerced); the SAME
+    None-distance-chunk check Change 15's review caught missing from ITS
+    original test suite, re-verified independently for this ported version
+    rather than assumed to carry over automatically just because the logic
+    looks the same; and a REAL (not mocked) call into gene_validator.py
+    confirming a genuine classical-genetics mention ("Co-1") gets extracted
+    and validated correctly through the actual module this footer depends
+    on. Did not attempt a live gradio_client-style end-to-end check the way
+    Changes 13/15 got on hf_space/app.py — deploy/app.py isn't deployed
+    anywhere with a public endpoint to call, unlike the live Space.
 
 ================================================================================
 17. STEP 14 — RAGAS EVALUATION PIPELINE  (Change 4, src/eval_ragas.py)
@@ -1561,11 +1902,21 @@ METRICS COMPUTED:
                               REQUIRES a ground_truth reference answer.
 
   context_precision and context_recall are computed ONLY for questions with
-  a non-empty ground_truth in benchmark_questions.py — currently NONE (see
-  STEP 9's caveat: fabricating reference answers without verified corpus
-  access would produce numbers that look rigorous but rest on guesses).
-  Filling in even the 5 direct_lookup questions' ground_truth would unlock
-  meaningful context_recall on the category where it matters most.
+  a non-empty ground_truth in benchmark_questions.py — 11 of 75 as of
+  Change 11 (all 7 direct_lookup and 4 of 10 cross_section questions with
+  clean corpus support: DL-01, DL-03, DL-04, DL-07, DL-08, DL-09, DL-10,
+  CS-01, CS-02, CS-09, CS-10). These were populated by actually searching
+  data/processed_chunks.json (21,876 chunks, real text from the 964 indexed
+  papers) for verifiable supporting passages — not authored from general
+  domain knowledge, which was exactly what STEP 9's original caveat refused
+  to do without that access. The remaining 3 direct_lookup-adjacent topics
+  that looked plausible up front (soil pH range, herbicide product names,
+  deficit-irrigation WUE) and 6 more cross_section topics turned up no
+  clean, bean-specific match after real searching and were deliberately
+  left None — this crop-science-journal corpus simply doesn't cover some
+  agronomy-extension-style facts. See benchmark_questions.py's docstring
+  (item 1) for the full per-question breakdown of what's populated and why
+  the rest isn't yet.
 
 JUDGE MODEL: Gemini 2.0 Flash (free), via langchain_google_genai.ChatGoogleGenerativeAI
   wrapped in ragas.llms.LangchainLLMWrapper. Embeddings for answer_relevancy
@@ -1573,7 +1924,7 @@ JUDGE MODEL: Gemini 2.0 Flash (free), via langchain_google_genai.ChatGoogleGener
   langchain_community.embeddings.HuggingFaceEmbeddings, wrapped in
   ragas.embeddings.LangchainEmbeddingsWrapper — avoids any OpenAI dependency.
 
-DEPENDENCY FRAGILITY (see STEP 23 for the exact pinned versions): ragas,
+DEPENDENCY FRAGILITY (see STEP 26 for the exact pinned versions): ragas,
   langchain-community, and langchain-google-genai have real, verified
   version conflicts with each other outside a narrow compatible window —
   confirmed by actually installing combinations in an isolated venv, not by
@@ -1595,7 +1946,7 @@ PIPELINE (eval_ragas.py main()):
      questions with ground_truth)
   4. Run ragas.evaluate() twice: once with the reference-free metrics over
      ALL answered questions, once with the reference-based metrics over only
-     the (currently empty) ground_truth subset
+     the ground_truth subset (11 of 75 questions as of Change 11)
   5. Merge per-question, save to data/ragas_results.json with a timestamp,
      aggregate scores, and by-category breakdowns
 
@@ -1702,10 +2053,16 @@ BUILD: build_gene_index.py downloads gene_info.gz (~1.5GB, streams/filters
   without loading fully into memory) + UniProt's P. vulgaris subset, builds
   gene_id_map (gene_id → metadata) and symbol_map (lowercased symbol/synonym
   → [gene_ids]), pickles to vector_db/gene_index.pkl. Zero new pip
-  dependencies (urllib.request is stdlib). See STEP 22 for the SLURM job —
+  dependencies (urllib.request is stdlib). See STEP 25 for the SLURM job —
   no GPU needed, but does need outbound HTTPS network access; the job script
   includes a login-node-download fallback path in its comments if compute
   nodes block that.
+
+CHANGE 16: the gene-validation footer built from this module's functions is
+  now ALSO wired into deploy/app.py (previously hf_space/app.py only) —
+  full writeup lives in STEP 13's Change 16 section, since that's where the
+  faithfulness check it was ported alongside is documented; nothing about
+  gene_validator.py itself changed.
 
 
 ================================================================================
@@ -1793,9 +2150,117 @@ Lazy-loaded read-only connection, same candidate-path pattern as BM25 and
 NOT BUILT in Change 6: the query router that decides WHEN to activate this
   vs. literature-only — that's Change 7 (STEP 17).
 
+── CHANGE 14: PER-PAPER STRUCTURED METADATA INDEX (scripts/build_paper_
+  metadata.py, src/paper_metadata.py — a SEPARATE database from this
+  section's trial_data.db, same conventions, different table) ──
+  CONCEPT: nothing in this project could cleanly filter by DOI, year,
+  species, or methodology as first-class fields — everything relied on
+  chunk-level metadata and embedding similarity. This adds a second small
+  SQLite table, ONE ROW PER PAPER (962, not 21,876 chunks — matches
+  data/paper_titles.json's own known 962/964 coverage, not the full 964;
+  same ~2-paper gap STEP 7's format_references() already documented), so a
+  question like "papers from 2015+ using GWAS methodology" is a real SQL
+  WHERE clause.
+
+  WHERE THE ORIGINAL "build mostly from data you already have" FRAMING WAS
+  OPTIMISTIC, verified directly rather than assumed: data/
+  embeddings_metadata.json and data/paper_titles.json only actually supply
+  source_file/DOI and title. Neither has a real per-paper year (only a
+  coarse 2-bucket "1961-2006"/"2007-2026" split), and neither has
+  species/methodology at all — those needed real, if cheap, classification
+  work, not just reformatting existing files. Reused where real prior art
+  already existed instead of rebuilding it: graphrag_workspace/output/
+  paper_graph.json (Change 9) already carries a doi/year/community per
+  paper — community and community_title are copied from it directly, but
+  year is NOT, because build_paper_graph.py's _year_from_title() (a bare
+  4-digit regex over the DOI-derived filename) was independently verified
+  wrong 18/964 times (1.9%) — including on 10.1002/plr2.20387, a real 2024
+  GWAS paper directly relevant to this section's own motivating example,
+  misread as year 2038 (the DOI suffix "20387" contains a spurious
+  "2038"). Fixed with a two-source cascade: (1) parse an explicit
+  "Received:/Accepted:/Published online: DD Month YYYY" date-stamp
+  printed on the paper's own first page, when present — 53/962 papers
+  (6%), rare but highly accurate since it's the paper's own printed date;
+  (2) fall back to the same DOI-suffix regex paper_graph.json uses (broad
+  coverage, ~2% error rate) only when (1) finds nothing; (3) sanity-bound
+  the result to [1900, current year] regardless of source, rejecting
+  anything outside as NULL rather than passing a garbage value through.
+  year_source records which method produced each value. Net: year
+  populated for 962/962 papers (100%), zero bogus values survive the bound
+  (verified: 0 rows outside [1900,2026] in the built table).
+
+  SPECIES / METHODOLOGY — best-effort, rule-based, MULTI-VALUED keyword
+  tags (comma-joined) over each paper's own FULL text, EXCLUDING the
+  references section — a citation merely mentioning "GWAS" or "soybean" in
+  a bibliography entry is not evidence this paper used or studied it, the
+  same reference-exclusion lesson Change 11's manual corpus verification
+  already established. NOT LLM-extracted, NOT authoritative — same
+  ★ HONESTY BOUNDARY convention as this section's own trial_data.db above.
+  Measured coverage (verified against the real corpus, not assumed):
+  species 941/962 (98%), methodology 491/962 (51%) — the other 49% simply
+  don't state a recognizable methodology in matchable terms; NULL there
+  means "not detected," not "confirmed absent." A real check for this
+  section's own "GWAS methodology" example found only 2 of 962 papers
+  actually using GWAS in their own text (not a citation) — most of this
+  corpus predates GWAS becoming a common technique (STEP 4/STATUS: 19,742
+  of 21,876 chunks are in the pre-2007 bucket) — the CAPABILITY is real,
+  this particular corpus's GWAS coverage is genuinely thin, and the
+  worked example ("papers from 2015+ using GWAS methodology") correctly
+  returns exactly 1 result (the 2024 paper above) once the year bug is
+  fixed, not a hypothetically-larger set.
+
+  DELIBERATELY NOT INCLUDED: a "trait" column. Species and methodology are
+  both closed(ish) vocabularies a handful of regexes can reasonably cover;
+  trait spans yield, a dozen+ named diseases, drought/heat/cold tolerance,
+  seed quality, nitrogen fixation, and more — an open-ended tagging problem
+  needing either a much larger keyword taxonomy or LLM extraction (like
+  scripts/extract_paper_titles.py's per-paper approach) to do well. Left
+  for a future, explicitly-scoped change rather than shipped as a crude,
+  low-value guess here — matches this project's established pattern of
+  keeping "the cheap piece now" separate from "the harder piece later"
+  (e.g. Change 12 deferring concurrent local+global execution).
+
+  SQLITE SCHEMA (vector_db/paper_metadata.db, table papers): doi (primary
+  key), source_file, title, year, year_source ('published_date' |
+  'doi_suffix' | NULL), community, community_title, species, methodology,
+  n_chunks, n_pages, token_count. Indexed on year, species, methodology.
+
+  QUERY INTERFACE (src/paper_metadata.py, copied identically to hf_space/,
+  same lazy-load/candidate-path/SQL-injection-safe-parameter-binding
+  pattern as structured_data.py above): query_papers(year_min=, year_max=,
+  species=, methodology=, doi=, community=, limit=200) — species/
+  methodology do a partial LIKE match against the tag string so a caller
+  doesn't need to know the exact tag vocabulary; get_available_species() /
+  get_available_methodologies(); format_paper_results(rows), mirroring
+  format_trial_results() above. Verified end-to-end against the real
+  built database (not synthetic fixtures): the worked example, a year-
+  range filter, a species partial match, an exact DOI lookup, a combined
+  AND filter across all three axes, default/explicit limit handling, and
+  the same SQL-injection safety check this section's trial_data.db
+  established as precedent — all passed.
+
+  SCOPE (as originally shipped): a standalone data layer + query interface
+  only, same scope Change 6 itself drew — NOT wired into query_router.py/
+  chat()'s live routing in this change, and the built vector_db/
+  paper_metadata.db was NOT uploaded to the Parimalanath/bean-lab-vector-db
+  HF dataset repo (unlike trial_data.db above, which is documented as
+  built-but-also-not-yet-uploaded — the same "capability built, deployment
+  is a separate, explicit step" state, not an oversight).
+
+  UPDATE — CHANGE 17: this deferred work is done. query_router.py now
+  detects species/methodology/year-filter intent and routes it to
+  paper_metadata.query_papers(), and vector_db/paper_metadata.db has been
+  uploaded to the dataset repo — see STEP 17's Change 17 section for the
+  full writeup. Exactly the "analogous to how Change 7 wired Change 6's
+  layer in one change later" path predicted above, one change later than
+  predicted (Change 17 rather than immediately after Change 14) because it
+  shipped only once asked for directly, not preemptively.
+
 
 ================================================================================
-20. STEP 17 — QUERY ROUTER  (Change 7, src/query_router.py)
+20. STEP 17 — QUERY ROUTER  (Change 7, src/query_router.py;
+    unified with GraphRAG mode detection in Change 12; paper_metadata.db
+    filtering wired in via Change 17)
 ================================================================================
 
 CONCEPT: Before Change 7, every question took the same path: expand → hybrid
@@ -1826,13 +2291,93 @@ DESIGN: rule-based only, no LLM classifier call. Unlike a GPT-4o-classifier-
   later without changing callers.
 
 RoutingDecision dataclass (richer than plain booleans, deliberately):
-  use_literature (~always True), use_structured_data, run_gene_validation,
-  PLUS the actual matched entities: detected_cultivars, detected_locations,
-  detected_traits, detected_genes, detected_year, detected_year_range.
-  Necessary, not just nice-to-have: query_trial_data(cultivar="Rex",
-  location="Elora", year=2019) needs those actual values — a bare boolean
-  flag would force re-parsing the query a second time downstream to recover
-  the same information, wastefully and fragilely.
+  mode ("local" or "global" — see CHANGE 12 below), use_literature (~always
+  True), use_structured_data, run_gene_validation, PLUS the actual matched
+  entities: detected_cultivars, detected_locations, detected_traits,
+  detected_genes, detected_year, detected_year_range. Necessary, not just
+  nice-to-have: query_trial_data(cultivar="Rex", location="Elora",
+  year=2019) needs those actual values — a bare boolean flag would force
+  re-parsing the query a second time downstream to recover the same
+  information, wastefully and fragilely.
+
+── CHANGE 12: UNIFYING THE TWO ROUTERS ──
+  Before this change, two independent, uncoordinated systems decided things
+  about the same incoming query: this module (rule-based, entity-aware,
+  flag-based), and a completely separate standalone _is_global() in
+  hf_space/app.py — a keyword-list check that ran BEFORE route() and gated
+  the ENTIRE pipeline into "local" or "global" before route() ever saw the
+  question. A query like "yield trends across all Michigan navy bean
+  trials" is structurally both a structured-data question (this router
+  should catch "yield," "Michigan," "navy") and a broad-synthesis question
+  (STEP 19's global mode should catch "trends," "across all") — but the old
+  structure made that impossible to express: _is_global() picked one path,
+  and route() only ever ran, and only ever COULD run, inside the "local"
+  branch _is_global() had already picked for it.
+
+  Fix: _GLOBAL_SIGNALS and the keyword check that used to be hf_space/
+  app.py's _is_global() now live in this module, and route() sets
+  decision.mode as one more field on the SAME RoutingDecision it already
+  returns, computed in the SAME pass as the other three flags.
+  hf_space/app.py's chat() now calls route() exactly ONCE, at the top of
+  the function, and branches on decision.mode — where it used to call a
+  separate standalone function first, then call route() a second time,
+  separately, only inside the branch already chosen. Net effect: one
+  call site, one decision object, where there used to be two of each.
+
+  SUPERSEDED BY CHANGE 13 (see STEP 19's Change 13 section): route() still
+  computes decision.mode exactly as described above, but hf_space/app.py's
+  chat() stopped reading it — Change 13 replaced keyword-based mode
+  selection with a confidence-based one, decided AFTER local retrieval runs
+  rather than from keywords before it. decision.mode is not removed (still
+  computed, still correct, still available to any future consumer) — it's
+  just not part of how mode gets chosen in the Space anymore. Left here,
+  not deleted, so this section's history stays accurate rather than
+  rewritten to look like Change 13 was the plan all along.
+
+  Scope deliberately kept narrow: mode is still exactly one of "local" or
+  "global" — never "both" — even though the Michigan/navy-bean example
+  above clearly wants both structured-data lookup AND community synthesis
+  running at once. Verified directly (not just claimed) that the
+  UNDERLYING decision object no longer forces a choice between them: with
+  synthetic structured-data vocabulary injected into the cache, route()
+  returns mode="global" and use_structured_data=True on the SAME
+  RoutingDecision for that exact query — structurally impossible before
+  this change. What's still NOT done: hf_space/app.py's chat() still only
+  ACTS on one mode — the "global" branch doesn't consume
+  use_structured_data, and there's no concurrent local+global execution or
+  answer-merging. That's real, separate work (new prompt assembly, new UI
+  handling for two result sets, deciding how to present a combined answer)
+  left for a later change, not silently papered over here — this change
+  fixes the structural bug (two uncoordinated decision points) without
+  also solving concurrent execution in the same commit.
+
+  use_literature/use_structured_data/run_gene_validation are computed
+  IDENTICALLY regardless of mode — route() doesn't special-case "global"
+  queries when detecting genes or structured-data terms. Confirmed
+  qa_with_ollama.py (and both eval scripts, which import route() through
+  it) gain decision.mode "for free," the same way they gained
+  use_structured_data/run_gene_validation in Change 7 originally — but
+  this is inert for them today: GraphRAG artifacts (community_reports.json,
+  community_embeddings.npy) are loaded ONLY in hf_space/app.py, confirmed
+  by checking qa_with_ollama.py directly before making this change, not
+  assumed. deploy/app.py has neither _is_global() nor route() at all,
+  confirmed the same way — unaffected by this change either way.
+
+  Backward compatibility: mode was added as a new dataclass field, not a
+  signature change to any existing field — existing consumers reading
+  use_literature/use_structured_data/run_gene_validation/detected_* are
+  unaffected. Verified directly: RoutingDecision's constructor signature,
+  route()'s return type, and qa_with_ollama.py's own syntax all still parse
+  and import cleanly against the updated module.
+
+  TESTED with synthetic queries covering each case: a pure local lookup
+  ("What diseases affect common bean?"), a pure global/thematic question
+  ("What are the major trends in bean breeding research over time?"), a
+  gene-mention query in each mode (confirming run_gene_validation is
+  independent of mode), and the flagship mixed-signal Michigan/navy-bean
+  example (confirming mode and use_structured_data can now coexist on one
+  decision object) — all matched expectation before this was wired into
+  hf_space/app.py's chat().
 
 DETECTION STRATEGY:
   - Gene mentions: reuse gene_validator.extract_gene_mentions() DIRECTLY —
@@ -1871,12 +2416,18 @@ INTEGRATION AND ORDERING FIXES THIS REQUIRED (both in qa_with_ollama.py and
     generator (not async def — worth being precise about this), threads are
     the right tool specifically because there's no async context to plug
     into.
-  - strict_evidence (qa_with_ollama.py) and the out-of-scope gate
-    (hf_space/app.py, deploy/app.py) both used to hard-stop purely on
-    literature-retrieval confidence. Both now check for structured trial
-    data FIRST — a narrow "yield of X in Y" question can have genuinely thin
-    literature coverage but a real structured-data answer, and the old logic
-    would have discarded it before this fix.
+  - strict_evidence (qa_with_ollama.py) and hf_space/app.py's out-of-scope
+    gate both used to hard-stop purely on literature-retrieval confidence.
+    Both now check for structured trial data FIRST — a narrow "yield of X
+    in Y" question can have genuinely thin literature coverage but a real
+    structured-data answer, and the old logic would have discarded it
+    before this fix. CORRECTED (Change 16, was wrong here before): this
+    does NOT include deploy/app.py's out-of-scope gate — confirmed directly
+    by tracing its imports, structured_data.py was never imported there at
+    all, so there was no structured-data path to check first. deploy/app.py
+    still hard-stops on literature confidence alone for this specific gate,
+    same as it always has; Change 16 didn't touch this (see STEP 19's
+    Change 16 section for what it did and didn't port).
   - Gene validation runs unconditionally regardless of run_gene_validation
     (see STEP 15's integration note) — the flag is a signal, not a gate.
   - Raw-vs-expanded query handling required NO extra plumbing beyond what
@@ -1892,6 +2443,77 @@ TESTED END-TO-END with synthetic fixtures at every layer (router decision →
   2019?" correctly detects cultivar=Rex, location=Elora, trait=yield,
   year=2019, and the assembled prompt places the resulting TRIAL DATA
   section before RETRIEVED SOURCES exactly as designed.
+
+── CHANGE 17: WIRING paper_metadata.db (CHANGE 14) INTO ROUTING ──
+  CONCEPT: Change 14 built the per-paper (DOI/year/species/methodology)
+  SQLite index and its query interface, then deliberately stopped — no
+  detection logic existed anywhere to notice a question wanted it, and the
+  built vector_db/paper_metadata.db was never uploaded. Both closed here,
+  in direct response to being asked "why isn't this wired in" after
+  Change 14 shipped.
+
+  DETECTION reuses the SAME two mechanisms this section's router already
+  uses for structured_data, rather than inventing new ones:
+    - Species/methodology: matched via the EXISTING _match_against_cache()
+      helper (see above) against the REAL tag vocabulary in the live
+      database (paper_metadata.get_available_species()/
+      get_available_methodologies()) — same "check what's actually there,
+      not a hardcoded list" principle as cultivar/location/trait, and the
+      same underscore-to-space normalization already handles tag slugs
+      like "phaseolus_vulgaris" and "qtl_mapping" matching natural
+      phrasing ("Phaseolus vulgaris", "QTL mapping") with no new matching
+      logic — just a new cache to match against.
+    - Bounded year range: reuses _extract_year() as-is (already used for
+      structured_data's year filtering).
+    - Open-ended year ("papers from 2015+", "since 2015", "after 2015",
+      "post-2015"): _extract_year() can't express "2015 or later, no
+      upper bound" — a NEW _extract_open_ended_year() regex was added
+      specifically for this phrasing, since it's the exact shape Change
+      14's own motivating example ("papers from 2015+ using GWAS
+      methodology") uses.
+
+  TRIGGER, deliberately narrower than "any year mention": a bare single
+  year with no other signal (e.g. "What happened in 2019?") does NOT set
+  use_paper_metadata — too easy to confuse with an incidental year
+  reference inside an ordinary literature question, the same false-
+  trigger risk already flagged elsewhere in this module for hardcoded
+  keyword lists. Fires only on a species match, a methodology match, or
+  an explicitly filter-shaped year phrase (open-ended or bounded-range).
+  All detected fields combine independently on one RoutingDecision —
+  "papers from 2015+ using GWAS methodology" sets BOTH
+  detected_paper_year_min=2015 AND detected_methodology=["gwas"] on the
+  same call, the exact compound case Change 14 was built for.
+
+  WIRING (hf_space/app.py's chat()): query_papers() is a plain local
+  SQLite lookup (sub-millisecond, same as structured_data.py) — runs
+  inline, not as a ThreadPoolExecutor future the way retrieval/trial-data
+  are. Composed into the SAME trial_data_block string prompts.py already
+  accepts and places before RETRIEVED SOURCES — ZERO changes to
+  prompts.py, since that module was already designed around "a
+  pre-formatted block to place, the row shape is someone else's concern"
+  (STEP 7) — a second block of that same kind needed no new parameter,
+  just string concatenation in chat() itself.
+
+  DEPLOYMENT: vector_db/paper_metadata.db uploaded to
+  Parimalanath/bean-lab-vector-db (previously built-but-not-uploaded, per
+  Change 14's own documented state) — arrives on the Space automatically
+  via the existing snapshot_download() call, no code change needed for
+  that part. deploy/app.py (Change 16) was NOT also given this wiring in
+  this change — it doesn't import query_router.py at all (confirmed
+  directly in Change 16's own investigation), so there's no router to
+  extend there; a separate, explicitly-scoped change if wanted later.
+
+  VERIFIED against the real local database before shipping: a 5-case
+  router matrix — the exact "papers from 2015+ using GWAS methodology"
+  worked example, a compound species+open-ended-year case, a bounded-range
+  + methodology case, and confirming a bare year mention alone correctly
+  does NOT trigger — plus the full chat()-side wiring exercised directly:
+  a real query_papers() + format_paper_results() call for the worked
+  example produces the correct single matching paper (the same 2024
+  Kikatiti GWAS paper Change 14 and Change 15's None-distance fix both
+  already surfaced), correctly formatted and ready for the prompt; also
+  confirmed the combined-block formatting when both trial-data and
+  paper-metadata blocks are present at once, not just paper-metadata alone.
 
 
 ================================================================================
@@ -2021,7 +2643,445 @@ WHAT WAS DELIBERATELY NOT DONE:
 
 
 ================================================================================
-22. KEY ERRORS ENCOUNTERED AND HOW THEY WERE FIXED
+22. STEP 19 — GRAPHRAG GLOBAL QUERY MODE  (Change 9, scripts/, hf_space/app.py;
+    + Change 13, escalating router; + Change 15, bounded gap-check loop —
+    both live here despite the section title, since this is where chat()'s
+    "what to do about a weak local retrieval" decision chain already lives)
+================================================================================
+
+CONCEPT: Not every question is about one specific fact findable in a handful
+  of chunks. "What are the major trends in bean breeding research over the
+  last 30 years?" needs a synthesis ACROSS the whole corpus, not just the
+  top-6 most similar passages — no single paper's chunks answer it. GraphRAG
+  (Microsoft's approach) addresses this by first clustering the corpus into
+  topic "communities," summarizing each community once (offline, expensive),
+  and at query time retrieving/synthesizing from those community summaries
+  instead of raw chunks.
+
+  UPDATED IN CHANGE 12, THEN SUPERSEDED BY CHANGE 13: Change 12 folded a
+  previously-standalone keyword check (_is_global()) into query_router.py's
+  route() as one more field (decision.mode) on the shared RoutingDecision
+  object — one router, one call site, instead of two uncoordinated ones,
+  but mode was still decided from keywords alone, before any retrieval. See
+  STEP 17's CHANGE 12 section for that history. Change 13 (below) replaces
+  keyword-based mode selection entirely with a confidence-based one —
+  decision.mode is still computed by route() but is NO LONGER READ by
+  hf_space/app.py's chat() as of Change 13; _GLOBAL_SIGNALS itself is
+  untouched in query_router.py, just unconsulted for this purpose now.
+    mode decision, as of Change 13 (see CHANGE 13 section below):
+      confidence-based, computed AFTER local retrieval already ran, not from
+      keywords before it.
+    "local"  → the normal per-question retrieval pipeline (STEP 6/12 + router)
+    "global" → GraphRAG: embed the question, find the top-5 most similar
+               community reports, feed their summaries to the LLM, and also
+               render a highlighted subgraph of the papers in those
+               communities (via pyvis) so the answer comes with a visual
+               map of which paper cluster it's drawn from
+
+── CHANGE 13: ESCALATING ROUTER (hf_space/app.py's chat(), not
+  query_router.py — GraphRAG is Space-only, so this whole mechanism lives
+  where GraphRAG already lives) ──
+  CONCEPT: a fixed keyword list can't know whether a question is actually
+  well-covered locally — it can only guess from phrasing. "What are bean
+  yield trends over time" contains "trends" and goes global whether or not
+  the corpus happens to have a great specific answer; "How do bean cultivars
+  compare for rust resistance" contains "compare" and goes global even if
+  it's really a narrow, well-covered local question. Change 13 replaces the
+  guess with a measurement: run the (cheap — no LLM call) local retrieval
+  FIRST, for every question, and decide mode from what assess_confidence()
+  (Change 2, src/retriever.py) actually found.
+
+  DECISION, finalized in writing (hf_space/app.py, as a spec comment
+  directly above chat(), before the implementation was written — not
+  re-derived from a chat log after the fact) BEFORE coding, per this
+  project's established discipline for decisions that would otherwise drift
+  the way NO_MATCH_THRESHOLD/THRESHOLD_UNSUPPORTED already have:
+    escalate = global_available AND trial_rows is empty AND
+               confidence != "SUPPORTED" AND NOT none_distance_artifact
+  Five sub-decisions behind that one line:
+    1. TRIGGER is the confidence LABEL, not UNSUPPORTED alone. Checked
+       against 11 questions independently verified (Change 11) to have real
+       corpus support and 9 verified to have none: INFERRED never fired
+       across 23 real test queries, and UNSUPPORTED alone only caught 1 of
+       9 confirmed-thin questions — escalating only on UNSUPPORTED would
+       have missed most of the real problem cases. "!= SUPPORTED" (i.e.
+       PARTIALLY_SUPPORTED, INFERRED, or UNSUPPORTED all escalate) is what
+       the real distribution actually supports.
+    2. decision.mode (the OLD keyword signal) is explicitly NOT part of the
+       trigger — confirmed, not assumed, after catching an internal
+       contradiction: "confidence low OR keyword suggests breadth" (a plain
+       OR) would mean a keyword-matched query ALWAYS escalates even when
+       local retrieval comes back SUPPORTED, directly breaking the design
+       goal of avoiding expensive graph search on a query that's secretly
+       answerable locally despite containing a trigger word. Confidence
+       alone already satisfies both goals: a genuinely broad question lands
+       non-SUPPORTED without needing a keyword, and a keyword-matched but
+       well-covered question lands SUPPORTED and correctly stays local.
+    3. GUARD — a None distance (chunks[0] came from BM25 only, no dense
+       embedding score) is NOT a measured low-confidence signal, and
+       assess_confidence()'s _dist() defaults it to 1.0 — the worst case,
+       mathematically guaranteed to produce UNSUPPORTED specifically (1.0
+       fails even THRESHOLD_INFERRED, so this can only ever manifest as
+       UNSUPPORTED, never PARTIALLY_SUPPORTED/INFERRED). Not hypothetical:
+       3 of the same 23 test queries (13%) had a None top distance, and one
+       was a CONFIRMED well-covered question (nitrogen fixation rates) that
+       landed UNSUPPORTED purely from this artifact. Guard: UNSUPPORTED +
+       None top distance does NOT escalate — mirrors hf_space/app.py's
+       _out_of_scope(), which already refuses to treat the identical signal
+       as evidence of no match, for the identical reason.
+    4. Non-empty trial_rows (structured trial data, Change 6/7) BLOCKS
+       escalation — if structured data can still answer the question, that's
+       a real local answer, not a reason to discard it for global synthesis.
+    5. SCOPE is full replacement, no merging: escalation means ONLY the
+       global-mode answer gets generated — the check happens before the
+       local LLM call, so nothing is generated only to be discarded. No
+       concurrent local+global execution or answer-combining — deliberately
+       deferred, same "both"-mode boundary Change 12 already drew.
+
+  STRUCTURAL CHANGE: local retrieval (+ concurrent structured-data lookup,
+  + out-of-scope retry) now runs UNCONDITIONALLY first, for every
+  non-greeting question, rather than being gated behind a pre-decided mode.
+  mode starts "local" and is set to "global" only via the escalation check
+  above — there is no other path to mode=="global" in chat() as of this
+  change. One incidental resilience improvement this reordering yields for
+  free: if `retriever` itself is unavailable, that's now treated as maximal
+  low confidence (chunks=[], confidence defaults to UNSUPPORTED) rather than
+  an immediate hard failure — escalates to global if that's viable, only
+  fails outright if global isn't viable either.
+
+  VERIFIED before shipping, in two layers:
+    1. A full decision-matrix test (11 cases) against the exact boolean
+       expression copied verbatim from the file — every combination of
+       trigger label, the None-distance guard, trial_rows, and global
+       availability, including the retriever-unavailable resilience case.
+    2. The SAME 23 real queries used to originally diagnose this (11
+       confirmed-covered, 9 confirmed-not-covered, 3 out-of-scope — real
+       vector_db, real retriever, no mocking) run back through the shipped
+       should_escalate logic: confirmed-covered questions stay local 82% of
+       the time (2/11 escalate — an accepted, bounded false-positive cost);
+       confirmed-not-covered questions escalate 67% of the time (6/9) — vs.
+       only 11% (1/9) under the rejected "escalate on UNSUPPORTED alone"
+       design. The nitrogen-fixation None-distance case specifically stayed
+       local in this real-data run too, confirmed via the guard catching it
+       (not coincidence — the other Group-A escalation was a genuine
+       PARTIALLY_SUPPORTED case, not the None-distance one).
+
+── CHANGE 15: BOUNDED GAP-CHECK LOOP (Self-RAG, hf_space/app.py — local
+  retrieval only, does not touch this section's GraphRAG machinery at all)
+  ──
+  CONCEPT: Self-RAG (STEP 13's faithfulness check, "Self-RAG lite") checks
+  an answer AFTER generation. Change 15 adds the same idea BEFORE
+  generation: once local retrieval settles, ask a cheap Gemini call "is
+  this context actually enough to answer the question, and if not, what
+  search query would find something better" — and if not, reformulate and
+  retrieve again, capped at 2 iterations.
+
+  NOT a second, competing "is this good enough" mechanism sitting beside
+  Change 13's escalation decision just above — that would be exactly the
+  uncoordinated-second-decision-point problem Change 12 was built to
+  eliminate in the first place. This is a refinement layer UNDERNEATH
+  Change 13: it may improve (chunks, confidence) before should_escalate
+  ever reads them, but should_escalate itself is completely unchanged —
+  still reads whatever (chunks, confidence, trial_rows) exist when it runs,
+  regardless of whether this loop touched them first.
+
+  DECISION, finalized in writing (hf_space/app.py, spec comment directly
+  above chat(), before the implementation) same discipline as Change 13:
+    1. TRIGGER — same base condition as Change 13's escalation
+       (confidence != "SUPPORTED"), gated on not trial_rows (identical
+       reasoning: structured data already answering the question means no
+       need to spend an LLM call improving literature retrieval) — but
+       DELIBERATELY WITHOUT Change 13's none_distance_artifact guard. That
+       guard exists because a raw distance value can't tell whether a
+       None-distance (BM25-only) top chunk is good evidence or not; this
+       loop's classifier is a DIRECT, qualitative read of the actual chunk
+       text — exactly the higher-fidelity signal the distance guard can't
+       provide. Running the gap-check specifically on that ambiguous case,
+       instead of skipping it, is the point: without this change it's a
+       dead end Change 13 just accepts; with it, that case gets a real
+       chance to improve via reformulation before Change 13 ever decides
+       anything about it.
+    2. ITERATIONS — "capped at 2" means up to 2 reformulate-AND-retry
+       cycles (up to 3 total retrieval calls per question, counting the
+       free initial one Change 13 already made unconditional). Each
+       iteration is ONE combined Gemini call — sufficiency judgment AND a
+       suggested better query in the SAME JSON response, not two
+       round-trips — followed by, only if insufficient, one retrieval
+       call. Exits early on sufficient=True, on confidence reaching
+       SUPPORTED mid-loop (no point asking again), or on any Gemini
+       failure (point 4).
+    3. WHAT'S PASSED TO THE CLASSIFIER: the ORIGINAL question (`message` —
+       never the reformulated search string, so the judgment is always
+       against what was actually asked), the search query that actually
+       produced the current chunks, and build_context(chunks) — the SAME
+       formatting helper Change 9a's _verify_faithfulness() already uses,
+       not reimplemented.
+    4. SOFT-FAIL, identical philosophy to _verify_faithfulness(): missing
+       API key, a failed request, or unparseable JSON all default to
+       (sufficient=True, reformulated_query=None) — stop looping, proceed
+       with whatever (chunks, confidence) already exist. A broken
+       sufficiency check can never make an answer worse than the
+       pre-Change-15 baseline, only occasionally fail to make it better.
+    5. SCOPE — local retrieval only. Reformulating for ~21,876 individual
+       chunks has much more to gain than reformulating for the coarse,
+       fixed set of ~5 community reports Change 13 already reasoned about;
+       this loop lives entirely inside chat()'s `if retriever is not
+       None:` block, structurally unable to touch the global branch.
+    6. COST, stated plainly rather than hidden behind "cheap": the trigger
+       condition (confidence != SUPPORTED) fired on 18% of confirmed-
+       covered and 89% of confirmed-thin questions in Change 13's own
+       calibration data — this loop can add up to 2 extra Gemini
+       round-trips and 2 extra retrieval calls, before generation even
+       starts, on top of that share of real traffic. A new status message
+       (_STEP_REFINING = "Refining search...") is shown while it runs, so
+       the added latency reads as visible progress, matching every other
+       multi-second step in chat().
+
+  IMPLEMENTATION: _check_context_sufficiency(question, search_query,
+  context) — one Gemini call, same try/except/regex-extract/json.loads
+  soft-fail chain as _verify_faithfulness(), returns
+  (sufficient: bool, reformulated_query: Optional[str]).
+  _gap_check_retrieve(message, search_query, chunks, confidence,
+  retriever_obj, max_iterations=2) — the loop itself, a plain function
+  (not a generator — chat() yields _STEP_REFINING once before calling it,
+  matching how _search_communities()/_render_graph() are already called:
+  status yields happen in chat() around a call, never inside a nested
+  generator). Wired in between the existing free out-of-scope retry
+  (context_query → message fallback, unchanged) and Change 13's
+  should_escalate computation — a new `search_query` variable tracks
+  whichever query text actually produced the current chunks (starts as
+  context_query, becomes message after the free retry, becomes each gap-
+  check iteration's suggested reformulation after that), kept entirely
+  separate from `message`, which stays the true original question
+  throughout for generation/citation/history.
+
+  VERIFIED before shipping: an 8-case test against
+  _check_context_sufficiency() and _gap_check_retrieve() copied VERBATIM
+  from hf_space/app.py (confirmed statement-for-statement via Python's ast
+  module, not eyeballed) with _call_gemini and retriever.retrieve mocked —
+  iteration capping at 2, early-exit on sufficient=True, early-exit when a
+  reformulated retrieval reaches SUPPORTED mid-loop, soft-fail on a Gemini
+  exception, soft-fail on unparseable JSON, zero wasted Gemini calls when
+  already SUPPORTED, and the empty-context short-circuit (no chunks at all
+  skips straight to no-op rather than calling Gemini with nothing to
+  judge) — all passed.
+
+  A GAP IN THAT VERIFICATION, CAUGHT ON REVIEW AND CLOSED: point 1's
+  none_distance_artifact reasoning assumes the sufficiency call actually
+  RECEIVES real chunk text even when a chunk's distance is None — the
+  8-case test above didn't originally include that exact case (7 cases
+  used real-valued distances or empty chunks; none used a present chunk
+  with distance=None specifically). Traced to source rather than assumed:
+  build_context() (prompts.py) includes c["text"] UNCONDITIONALLY — the
+  None-distance handling only affects the "WEAK EVIDENCE" tag, never
+  whether text is included; _hybrid_fuse() (retriever.py), the actual code
+  path that produces a distance=None chunk, does `entry = dict(meta);
+  entry["distance"] = None` — copies the BM25 metadata entry wholesale,
+  only overwrites distance; and that BM25 metadata (built in
+  build_vector_store.py) has the same text/doi/page/section shape as a
+  dense-retrieved chunk. Test 8 was added to confirm this directly rather
+  than resting on that trace alone: a real BM25-only-shaped chunk
+  (distance=None, real text/doi/page) run through the REAL build_context()
+  (imported directly, not the test's own simplified stand-in the other 7
+  cases used) with the Gemini call intercepted to inspect exactly what
+  prompt text it received — confirmed the chunk's marker text and DOI
+  citation both reached the actual prompt. The design reasoning in point 1
+  holds against the real code path, not just against the guard's logic in
+  a different function (Change 13's should_escalate).
+
+  CHANGE 16: this gap-check loop is now ALSO ported to deploy/app.py,
+  alongside the faithfulness check — full writeup lives in STEP 13's
+  Change 16 section (the two were a package deal: same Gemini-vs-Qwen
+  provider decision, same "verbatim copy, not a shared module" choice,
+  same soft-fail-to-no-op-if-unconfigured behavior). One real difference
+  worth knowing if you're reading this section specifically: deploy/app.py's
+  ported version takes an explicit `year_range` parameter this hf_space/
+  app.py version doesn't have, since deploy/app.py's retrieve() call is
+  parameterized by a year-filter dropdown this app's UI has and
+  hf_space/app.py's doesn't — re-verified independently there, not assumed
+  to carry over just because the rest of the logic is identical.
+
+OFFLINE BUILD PIPELINE (run on HPCC, GPU node, in this order):
+  1. scripts/prepare_graphrag_input.py — reformats data/processed_chunks.json
+     into the plain per-document text files Microsoft's graphrag library
+     expects as input.
+  2. jobs/build_graphrag.sb — runs the graphrag indexing pipeline itself
+     (entity/relationship extraction via LLM, community detection, community
+     report generation). This is the expensive, slow step — it's what
+     produces graphrag_workspace/output/community_reports.parquet and the
+     entity/relationship tables the paper graph is built from.
+  3. scripts/export_graphrag_summaries.py — reads
+     community_reports.parquet, keeps only the columns the Space actually
+     needs (id, community, level, title, summary, findings, full_content,
+     rank), sorts by rank, and writes graphrag_workspace/output/
+     community_reports.json. This is what gets uploaded to the HF dataset
+     repo as community_reports.json.
+  4. scripts/build_paper_graph.py — builds the paper-to-paper graph (nodes =
+     papers with year/community/degree metadata, edges = co-occurrence in a
+     community/relationship) → graphrag_workspace/output/paper_graph.json,
+     also uploaded to the dataset repo. This is what hf_space/app.py's
+     _render_graph() visualizes via pyvis.
+  5. scripts/embed_community_reports.py — see ERROR 17 below for why this
+     step exists at all. Precomputes the embedding vector for every
+     community report's (title + " " + summary) text using the SAME model
+     as retrieval (BAAI/bge-large-en-v1.5), and saves
+     graphrag_workspace/output/community_embeddings.npy. This MUST be
+     regenerated any time community_reports.json changes (the two files are
+     positionally aligned — see the shape-mismatch guard in app.py's
+     startup code) and MUST use the identical "{title} {summary}" text
+     construction app.py's _search_communities() uses for the query side,
+     or the two are not comparable in the same vector space.
+
+  All four output files (community_reports.parquet is NOT uploaded — only
+  the exported .json/.npy derived from it) get pushed to
+  Parimalanath/bean-lab-vector-db alongside chroma.sqlite3/bm25_index.pkl/
+  gene_index.pkl/trial_data.db, and travel to the Space via the same single
+  snapshot_download() call — no separate upload mechanism needed.
+
+RUNTIME LOADING (hf_space/app.py startup, current — see ERROR 17 for what
+  this replaced):
+    community_reports.json and paper_graph.json are read directly from the
+    snapshot_download() path (DB_PATH) — NOT re-fetched individually via
+    hf_hub_download(), which the original implementation did redundantly.
+    community_embeddings.npy is loaded the same way; if it's missing, or its
+    row count doesn't match len(_community_reports), _community_embeddings
+    stays None and "global" mode is cleanly disabled (chat() checks
+    `_community_reports and _community_embeddings is not None` before
+    entering global mode — both conditions, not just the first, after
+    ERROR 17's fix) rather than silently degrading or hanging.
+
+_search_communities(query, top_k=5): embeds the query with the BGE query
+  instruction prefix (BGE_QUERY_INSTRUCTION, imported from retriever.py —
+  same asymmetric-embedding convention as STEP 6's dense retrieval), computes
+  a plain dot product against the precomputed community_embeddings matrix
+  (vectors are pre-normalized, so this IS cosine similarity), and returns the
+  top-5 reports by score.
+
+_render_graph(highlight_ids): builds a pyvis Network, colors/sizes nodes by
+  degree, dims/grays out any node NOT in the current answer's relevant
+  communities (highlight_ids), and returns the rendered HTML for the
+  #graph-out panel. Runs only in "global" mode — "local" mode never touches
+  the graph.
+
+CHANGE 9a — FAITHFULNESS + GENE VALIDATION EXTENDED TO GLOBAL MODE (closes
+  the gap this section used to flag here as "WHAT'S STILL MISSING"): global
+  mode previously had no equivalent of local mode's faithfulness check
+  (STEP 13) or gene validation (STEP 15) — a community-summary answer could
+  claim something unsupported, or mention a fabricated gene, with zero
+  verification. Fixed mechanically, reusing both existing checks as-is
+  rather than building new ones:
+    - _verify_faithfulness() (STEP 13) was refactored to take a plain
+      `context: str` instead of a `chunks: list` — it only ever needed the
+      text to check claims against, not chunk-specific fields (doi, page,
+      etc.), so this made it usable from both call sites without
+      duplicating logic. Local mode now explicitly passes
+      build_context(chunks) (previously built internally); global mode
+      passes the SAME community-summary `context` string it already built
+      to prompt the LLM — no separate context assembly needed.
+    - _verify_gene_mentions() (STEP 15) took only `answer` to begin with,
+      so it required zero changes — called identically in both modes.
+  Both run right after answer generation, gated behind the same
+  _STEP_VERIFYING status message local mode already used (now genuinely
+  shared, not local-only), and both remain soft-fail-only footers exactly
+  as designed in Changes 3/5 — never block or replace the primary answer,
+  including in global mode.
+  Global mode still has no equivalent of Change 7's query router or
+  Change 6's structured trial-data layer — those genuinely don't apply to
+  a community-summary synthesis path, unlike faithfulness/gene checks,
+  which were just never wired up rather than inapplicable.
+
+
+================================================================================
+23. STEP 20 — CHAT HISTORY SIDEBAR + GRAPH/REFERENCE UI POLISH
+    (Change 10, hf_space/app.py + prompts.py)
+================================================================================
+
+CONCEPT: Five commits (Aug 5 22:36 - Aug 7 00:35), all on hf_space/app.py,
+  all Space-only (same scope boundary as Changes 3/5/8 — none of this
+  touches src/ or deploy/app.py). Four are user-facing fixes/polish to
+  features that already existed; the fifth (the sidebar) is new. Grouped
+  here as one Change because they landed together and the last three were
+  found and fixed using the same local-verification discipline (see ERROR
+  21) adopted after ERROR 20 was caused by a blind push.
+
+--- REAL PAPER TITLES IN REFERENCES (commit 1e5cbab) ---
+  format_references() (STEP 7, prompts.py — both copies) gained an optional
+  `titles: Optional[Dict[str, str]]` parameter: a {source_file: title}
+  lookup loaded from data/paper_titles.json (see scripts/extract_paper_
+  titles.py — an LLM extracts each paper's real title from its own text,
+  since filenames/DOIs alone aren't human-readable; this is the same file
+  that already powered the GraphRAG paper-graph's node labels, Change 9).
+  When a reference's source file has a known title, the list now shows
+  "Paper Title (doi:X)" instead of a bare "doi:X" link; falls back to the
+  old bare-DOI format for any paper not in the lookup (e.g. outside the
+  964-paper GraphRAG corpus). See STEP 7 below for the exact before/after.
+
+--- GRAPHRAG GRAPH: "STABILIZING... 0%" FIX (commit 909510d) ---
+  Symptom: the panel under a global-mode answer (STEP 19's _render_graph())
+  showed pyvis's loading bar forever, never the actual graph.
+  Root cause, confirmed via headless-browser test, not assumed: gr.HTML()
+  inserts its value as inert markup — <script> tags in it never execute.
+  pyvis's whole graph is built by JS inside a <script> tag, so it could
+  never get past the static loading bar.
+  Fix: _render_graph() now wraps pyvis's generated HTML in
+  <iframe srcdoc="...">, which parses its content as a genuinely separate
+  document with real script execution. Also switched cdn_resources to
+  "in_line" (default "local" makes pyvis reference lib/bindings/utils.js by
+  a relative path that 404s once embedded outside pyvis's own output
+  directory). Full mechanism documented directly in _render_graph()'s own
+  docstring, hf_space/app.py.
+
+--- CLICK-TO-OPEN-PAPER ON GRAPH NODES (commit 98f8a8d) ---
+  Each graph node now opens its source paper (via DOI) in a new tab when
+  clicked. _render_graph() builds a {node_id: doi} map (falling back to
+  deriving the DOI from the node id when the graph data doesn't carry one
+  directly) and appends a small <script> after pyvis's own generated one
+  (script tags execute in document order, confirmed by inspecting pyvis's
+  actual output) that listens for vis.js's network.on('click', ...) and
+  calls window.open('https://doi.org/'+doi, '_blank') — window.open(), not
+  a direct navigation, because the click happens inside the iframe the
+  graph itself lives in; a location change there would navigate the
+  iframe, not the user's tab.
+
+--- CHATGPT-STYLE CHAT HISTORY SIDEBAR (commit bd53dfd, the new feature) ---
+  A left sidebar: "+ New Chat" button + a list of past chat sessions.
+  Click a session to switch to it; hover reveals a delete (×) button.
+  Entirely client-side — localStorage, keyed
+  `bean_lab_chat_sessions_v1` → {"sessions": {id: {title, messages,
+  updatedAt}}, "activeId"}. Tied to one browser/device (clears if browsing
+  data is cleared, doesn't follow to another browser/computer); no backend
+  database, no change to the server-side conversation-memory TTL logic
+  from Change 8 (STEP 18).
+  KEY DESIGN POINT — chat_with_session_save() (hf_space/app.py, thin
+    wrapper around the untouched chat()): yields history JSON-stringified
+    as a 4th output from the SAME event that updates the chatbot, instead
+    of a later step re-reading the chatbot's value. This exists because of
+    a confirmed Gradio limitation, not a style choice — see ERROR 21(d).
+  WIRING: send.click/msg.submit → chat_with_session_save() (outputs
+    chatbot, followup_html, graph_out, history_json) → history_json.change()
+    (js=window.BeanChat.saveTurn, real fn=_identity per ERROR 21(c)) →
+    sidebar_list. New Chat / session click / delete all funnel through one
+    hidden session_trigger Textbox's .change() → _apply_session_trigger().
+    Both carrier textboxes (session_trigger, history_json) are visible=True
+    + CSS off-screen positioning, not Gradio's visible=False — see
+    ERROR 21(b) for why.
+  All of window.BeanChat (load/remove/newChat/saveTurn) plus the initial
+    restore-on-page-load logic lives in one JS string constant,
+    _JS_SESSION_INIT, in hf_space/app.py — see that constant's own comments
+    for the localStorage schema and the delegated-click-listener pattern
+    used for the dynamically-rendered session list (#session-list).
+  VERIFICATION: built and verified entirely against a local Playwright-
+    driven repro (headless Chromium) BEFORE being pushed — an 8-step suite
+    (fresh load → send message → second message same session → refresh
+    persistence → New Chat → second session → switch sessions → delete
+    session) all passed with zero page errors. This was a deliberate
+    departure from this project's usual push-straight-to-the-live-Space
+    workflow, adopted specifically because ERROR 20 was a real regression
+    caused by skipping it.
+
+
+================================================================================
+24. KEY ERRORS ENCOUNTERED AND HOW THEY WERE FIXED
 ================================================================================
 
 ERROR 1: transformers incompatible with huggingface-hub
@@ -2251,9 +3311,230 @@ ERROR 16: _call_gemini() silently dropped the current turn once conversation
        not an SDK) has a different multi-turn shape that this codebase had
        never previously needed to produce.
 
+ERROR 17: HF Space startup hung 30+ minutes, killed by HF's health-check
+          timeout (Change 9, GraphRAG)
+  Symptom: Live "Runtime error: Launch timed out, workload was not healthy
+           after 30 min." Container logs (the actual evidence — not
+           inferred) showed embedder, ChromaDB, and the cross-encoder all
+           loading successfully, then community_reports.json downloading a
+           SECOND time (redundant — see Cause), then nothing: the
+           "✓ N community reports" line that only prints after the next
+           step finishes never appeared, meaning startup was stuck inside
+           that step and never reached it.
+  Cause: hf_space/app.py's original GraphRAG integration called
+         embedder.encode() over all ~5,130 community report (title+summary)
+         texts SYNCHRONOUSLY AT STARTUP, using BAAI/bge-large-en-v1.5
+         (335M params). HF Spaces' free tier is CPU-only. This project's own
+         docs (STEP 4) note bge-large-en-v1.5 takes "3-5 minutes for 21,876
+         chunks ON A V100 GPU" — CPU inference for a model this size is
+         typically 10-50x slower, and encoding 5,130 texts on CPU alone
+         plausibly exceeds the 30-minute health-check window outright.
+         Separately (found while fixing this, not the main cause):
+         community_reports.json and paper_graph.json were each being
+         re-downloaded a second time via individual hf_hub_download() calls,
+         despite already being present from the snapshot_download() of the
+         whole dataset repo a few lines above — wasteful, though fast enough
+         (<1s for 14.8MB) not to be the hang itself.
+  Fix: Added scripts/embed_community_reports.py (STEP 19) to precompute
+       community_embeddings.npy OFFLINE, on HPCC with GPU, once — not per
+       Space boot. app.py now loads this file directly from the already-
+       downloaded snapshot_download() path instead of calling encode() at
+       runtime. If the file is missing or its row count doesn't match the
+       report count, "global" mode disables itself cleanly (a warning is
+       logged, chat() shows "Knowledge graph not available") rather than
+       falling back to the same startup-blocking encode() call or silently
+       serving broken/empty global-mode answers. Also fixed the redundant
+       re-downloads by reading both files from DB_PATH directly.
+  Related gap this surfaced and also fixed: chat()'s guard for entering
+       "global" mode originally checked only `if not _community_reports`,
+       not whether embeddings were actually loaded — meaning a
+       reports-without-embeddings state (exactly the state right after this
+       fix, before embed_community_reports.py has been run and uploaded)
+       would have silently entered global mode and produced a degraded
+       answer from an empty community search instead of the clear
+       "Knowledge graph not available" message. Now checks both.
+
+ERROR 18: Every retrieval query crashed live — chroma.sqlite3 built with
+          384-dim embeddings, code expects 1024-dim (found August 5, 2026)
+  Symptom: Chat input appeared broken (no visible bug from typing itself —
+           see the note at the end of this entry) and clicking Send always
+           produced Gradio's generic red "Error" toast with no detail
+           shown (Gradio does not surface raw tracebacks to users by
+           default). Container logs showed the real exception on every
+           single query:
+             chromadb.errors.InvalidArgumentError: Collection expecting
+             embedding with dimension of 384, got 1024
+           raised inside retriever.py's _chromadb_query(), inside the
+           ThreadPoolExecutor future chat() awaits — an unhandled exception
+           there crashes that request outright.
+  Cause: STEP 4's embedding-model upgrade (all-MiniLM-L6-v2, 384-dim →
+         BAAI/bge-large-en-v1.5, 1024-dim) had only ever been made in CODE
+         (retriever.py's query-side encoder, app.py's EMBED_MODEL,
+         generate_embeddings.py's default). Verified directly, not assumed:
+         data/embeddings.npy on this filesystem was still shape (21876,
+         384), with embeddings_metadata.json recording
+         model_name: "all-MiniLM-L6-v2", generation_date: 2026-03-26 — i.e.
+         the actual embedding-generation job was never re-run after the
+         code changed, so vector_db/chroma.sqlite3 (built from that stale
+         384-dim embeddings.npy) — including the copy already live in the
+         Parimalanath/bean-lab-vector-db HF dataset repo — was never
+         rebuilt to match. The query side has been producing 1024-dim
+         vectors and querying a 384-dim-indexed collection since whenever
+         that code change was first deployed; this is not a new
+         regression, just newly surfaced by someone actually running a
+         real query after other changes made that possible again.
+  Fix — CONFIRMED COMPLETE (was "in progress" as of this doc's prior
+       update; see the STATUS note at the top of this file): jobs/
+       generate_embeddings.sb was re-run (August 5, 2026, job 14748450 on
+       Tesla V100 via nvl-001, 639s, 34.2 chunks/s), confirmed data/
+       embeddings.npy is shape (21876, 1024) using BAAI/bge-large-en-v1.5.
+       jobs/build_vector_store.sb was then also re-run (using ptgpu, same
+       as ERROR 19's fix below) and the resulting chroma.sqlite3 +
+       bm25_index.pkl re-uploaded to the Parimalanath/bean-lab-vector-db HF
+       dataset repo (commit b3a37af, Aug 5 17:05) — confirmed by
+       database_statistics.json now recording embedding_dimension: 1024
+       and the dataset repo's git log. The live Space has been serving
+       real answers since.
+  Note on the "chat input doesn't register text" symptom reported alongside
+       this: turned out to be a genuinely SEPARATE, real bug after all, not
+       a side effect of this one — a CSS rule was hiding Gradio's own
+       structural label wrapper around the real textarea. See ERROR 20.
+
+ERROR 19: bean_llm conda environment corrupted — broken python3 symlink
+          (found August 5, 2026, while re-running generate_embeddings.sb)
+  Symptom: jobs/generate_embeddings.sb (submitted via sbatch on
+           dev-amd20-v100) failed in ~15 seconds with "Error: Missing
+           dependencies: No module named 'sentence_transformers'", despite
+           the job log showing Python/PyTorch/CUDA info printing
+           successfully just before that line.
+  Cause: Investigated directly (not assumed) by inspecting
+         /mnt/scratch/kodumuru/conda/envs/bean_llm/bin/ on the dev node:
+         `python3` is a symlink to `python3.10`, but no `python3.10` file
+         exists in that directory anymore — only a `python3.1` remains,
+         suggesting an interrupted or corrupted file operation at some
+         point after the environment was created (2026-03-21). The
+         directory also has stray tilde-prefixed remnants
+         (~entence_transformers, ~entence_transformers-2.2.2.dist-info)
+         alongside a newer sentence_transformers 5.3.0 install — consistent
+         with a partially-completed pip upgrade that never fully cleaned up
+         the old version. Root cause of the underlying corruption itself
+         was not determined; the environment was not repaired in place.
+  Fix: Rather than repair bean_llm, jobs/generate_embeddings.sb was
+       switched to activate /mnt/home/kodumuru/.conda/envs/ptgpu instead —
+       an existing environment already used for GPU PyTorch work, confirmed
+       working (torch 2.10.0+cu128, CUDA available). sentence-transformers,
+       chromadb, and rank-bm25 were pip-installed into it (label-studio
+       version-conflict warnings printed during install are pre-existing
+       and unrelated to this project's stack — not blocking). Hit, and
+       fixed, the SAME class of libstdc++ version-mismatch this project's
+       job scripts already had a documented workaround for (see STEP 1) —
+       chromadb's import chain failed with
+       `libstdc++.so.6: version 'CXXABI_1.3.15' not found` until
+       LD_LIBRARY_PATH was updated to put ptgpu's own (newer) libstdc++
+       ahead of the system one. jobs/generate_embeddings.sb now points at
+       ptgpu; jobs/build_vector_store.sb was given the identical change and
+       confirmed to run successfully against it the same day (see ERROR
+       18's fix above — this is what actually produced the rebuilt
+       chroma.sqlite3). If bean_llm ever gets repaired or recreated, both
+       job scripts should be switched back, since it remains the
+       environment described everywhere else in this document (STEP 1,
+       STEP 25/26) unless this entry says otherwise.
+
+ERROR 20: Chat input textbox unusable — clicking it produced no cursor, no
+          typed text ever registered (present since commit 74b6afd, only
+          root-caused Aug 5, 2026)
+  Symptom: clicking inside the message box did nothing — no visible cursor,
+           no character ever appeared while typing. Follow-up-question
+           chips (which set the textarea's value via JS) worked fine,
+           which is what made this genuinely confusing to diagnose from
+           behavior alone.
+  Cause: confirmed with a real headless-browser test (Playwright), not
+         assumed — `#msg-box label { display: none !important; }` had been
+         hiding Gradio 6.10's structural wrapper around the input
+         (`label > input-container > textarea`), not a caption label as
+         originally assumed when that rule was written. Hiding the
+         wrapper collapsed the real `<textarea>` inside it to 0x0 —
+         invisible AND unfocusable — while Gradio's own separate default
+         styling on the #msg-box wrapper div kept rendering a normal-
+         looking bordered box with nothing interactive inside it. The
+         follow-up chips still worked because
+         `document.querySelector('textarea').value = ...` sets a DOM
+         property directly, which doesn't care whether the element is
+         visible.
+  Fix: removed the CSS rule entirely. `show_label=False` was already
+       passed in Python for this component (STEP 7/msg Textbox
+       definition) — the correct, Gradio-native way to suppress the
+       caption, making the CSS override both wrong and unnecessary.
+       Verified locally before pushing: extracted the real CSS into a
+       minimal repro gr.Blocks app (no model/DB loading) and used
+       Playwright to confirm the textarea now has real geometry, receives
+       focus on click, and actually accepts typed input — then re-verified
+       the same way against the live Space after deploying.
+
+ERROR 21: Four undocumented Gradio 6.10 wiring quirks, found building the
+          chat-history sidebar (Change 10 / STEP 20, Aug 6-7, 2026)
+  Context: after ERROR 20 was caused by a blind CSS push, all further UI
+    work this session was built and verified against a local headless-
+    browser (Playwright) repro BEFORE touching the live Space. Building
+    the sidebar surfaced four separate, real Gradio 6.10 behaviors along
+    the way, none of which are documented anywhere in Gradio's own docs
+    and each of which silently fails with no error in the server log,
+    browser console, or SSE response — found only by isolating each down
+    to a minimal reproducible Blocks app.
+  (a) fn=None + js=-only output updates silently fail once a second
+      gr.Textbox exists anywhere on the page. Gradio's js= parameter has
+      two real modes: fn=None+js= computes and sets outputs purely
+      client-side (no server round-trip); fn=<real function>+js= uses JS
+      only to transform inputs before a real Python call. Mode 1 works
+      fine with exactly one Textbox on the page and silently does nothing
+      with two or more — confirmed via bisection down to a ~15-line repro,
+      confirmed NOT a timing/race issue (polled 8+ seconds), confirmed the
+      identical JS logic works when run directly via page.evaluate().
+      Fix used everywhere in this feature: always a real (even if
+      trivial) fn=, e.g. hf_space/app.py's `_identity()`; js= only
+      transforms inputs, never computes outputs on its own.
+  (b) gr.Textbox(visible=False) removes the element from the DOM
+      entirely (confirmed: document.querySelector returns null) — not
+      the same as CSS display:none on a wrapper. The sidebar needs two
+      JS-writable-but-visually-hidden carrier textboxes (session_trigger,
+      history_json); both use visible=True + CSS
+      `position:absolute; left:-9999px; ...` instead. display:none on an
+      ANCESTOR was already known to be destructive from ERROR 20 (collapses
+      real interactive descendants to 0x0) — this is the same lesson
+      applied to Gradio's own visible=False prop, not just hand-written
+      CSS.
+  (c) A synthetic `new Event('input')` dispatched via
+      element.dispatchEvent(...) only reaches Gradio's Python-side handler
+      through .change(), NOT .input() — confirmed directly by testing
+      both. Every JS-driven trigger textbox in this feature is wired via
+      .change().
+  (d) Reading a gr.Chatbot's value via inputs=[chatbot] in a .then() step
+      run immediately after that SAME chatbot was just updated by the
+      preceding step silently fails — the .then() call comes back with a
+      generic Gradio "Error" status and no detail anywhere (server log,
+      browser console, or SSE response). Confirmed independent of js= and
+      of what's done with the value, via a minimal isolated repro. Also
+      confirmed: reading a Chatbot's value through js= returns a
+      different, richer internal shape ({content:[{text,type}]}) than the
+      plain {content:"string"} shape Python-side code builds it with, and
+      trying to SET a Chatbot's value from a js= return using either shape
+      fails (one silently, one with "messages.flatMap is not a function")
+      — never set gr.Chatbot's value directly from js=; always route
+      through a real Python function.
+      Fix: chat_with_session_save() (hf_space/app.py) wraps the untouched
+      chat() and yields history JSON-stringified as a 4th output directly
+      from the SAME event that updates chatbot, so nothing ever needs to
+      re-read chatbot's value in a later chained step. See STEP 20 above
+      for how this is wired.
+  Net effect: none of these four are guessable from Gradio's documentation
+    or from a stack trace — each was found only by building a disposable,
+    minimal reproduction and driving it with a real headless browser. This
+    is now the standard approach for any further Gradio UI work on this
+    project (verify locally with Playwright before pushing), not a one-off.
+
 
 ================================================================================
-23. SLURM JOB SCRIPTS REFERENCE  (jobs/)
+25. SLURM JOB SCRIPTS REFERENCE  (jobs/)
 ================================================================================
 
 CONCEPT: What is SLURM?
@@ -2270,12 +3551,37 @@ CONCEPT: What is SLURM?
   Resources: 1 task, 4 CPUs, 32GB RAM, 2 hours, 1 GPU (V100)
   Purpose: Run src/generate_embeddings.py (BAAI/bge-large-en-v1.5, batch_size=16)
   Output: data/embeddings.npy, data/embeddings_metadata.json
+  ⚠ As of August 5, 2026 this activates /mnt/home/kodumuru/.conda/envs/ptgpu,
+    NOT bean_llm — see ERROR 19. Successfully re-run that day: job 14748450,
+    639s on a V100, confirmed output shape (21876, 1024).
 
 --- jobs/build_vector_store.sb ---
   Resources: 1 task, 4 CPUs, 16GB RAM, 1 hour, no GPU
   Purpose: Run src/build_vector_store.py — ChromaDB AND the BM25 index
            (Change 2 folded BM25 building into this same job/script)
   Output: vector_db/ (chroma.sqlite3, *.bin, bm25_index.pkl, database_statistics.json)
+  ⚠ STILL points at the broken bean_llm env as of this writing (see ERROR
+    19/STATUS note at top of file) — needs the identical ptgpu switch
+    generate_embeddings.sb already got, or it will fail the same way.
+
+--- jobs/build_graphrag.sb ---  (Change 9, NEW)
+  Resources: 1 task, 8 CPUs, 32GB RAM, up to 4 days, 1 GPU (V100),
+             partition general-long-gpu
+  Purpose: Runs the GraphRAG indexing pipeline fully locally via Ollama —
+           starts an Ollama server on the allocated GPU, pulls
+           nomic-embed-text if not cached, runs graphrag.index using
+           llama3.1:8b for entity/relationship extraction and
+           nomic-embed-text for embeddings. No API keys, no rate limits,
+           no cost. Produces graphrag_workspace/output/*.parquet.
+  Long time limit (4 days) reflects that LLM-driven entity extraction over
+  the full corpus is genuinely slow — cache in graphrag_workspace/cache/ is
+  safe to resume from if the job gets killed partway.
+  Downstream steps (not SLURM jobs — see STEP 19): after this completes,
+  run scripts/export_graphrag_summaries.py, scripts/build_paper_graph.py,
+  and scripts/embed_community_reports.py in that order (the last needs a
+  GPU for the sentence-transformers encode step; run it interactively on a
+  dev node rather than via sbatch — it's a one-off, fast job, not worth a
+  separate job script for).
 
 --- jobs/build_gene_index.sb ---  (Change 5, NEW)
   Resources: 1 task, 2 CPUs, 8GB RAM, 1 hour, no GPU
@@ -2310,12 +3616,22 @@ CONCEPT: What is SLURM?
   NEEDS: Googlegeminiapi or GEMINI_API_KEY exported in your shell BEFORE
          calling sbatch (the job checks for this and exits early if unset).
 
+⚠ GATEWAY NODE CANNOT SUBMIT JOBS (confirmed August 5, 2026): running sbatch
+  directly from the HPCC gateway/login node fails with "You are currently
+  using a gateway node. Please use one of the development nodes to run
+  software." sbatch must be run from an actual dev node, e.g.:
+    ssh dev-amd20-v100 "cd /path/to/hpcc-llm-qa && sbatch jobs/whatever.sb"
+  or an interactive session on one (ssh dev-amd20-v100, then cd + sbatch
+  normally). This isn't specific to any one job — it applies to sbatch
+  itself, from any script, always.
+
 SUBMITTING JOBS:
   sbatch jobs/process_pdfs.sb
   sbatch jobs/generate_embeddings.sb
   sbatch jobs/build_vector_store.sb
   sbatch jobs/build_gene_index.sb            # can run independently of the above
   sbatch jobs/extract_structured_data.sb      # can run independently of the above
+  sbatch jobs/build_graphrag.sb               # can run independently of the above
   Googlegeminiapi="..." sbatch jobs/run_ragas_eval.sb
 
   # Check status:
@@ -2332,7 +3648,7 @@ REMOVED in Change 2 (do not look for these — they no longer exist):
 
 
 ================================================================================
-24. CONDA ENVIRONMENT & PYTHON DEPENDENCIES
+26. CONDA ENVIRONMENT & PYTHON DEPENDENCIES
 ================================================================================
 
 Environment name: bean_llm
@@ -2401,7 +3717,7 @@ deploy/requirements.txt: same core set as hf_space, plus rank-bm25 (since
 
 
 ================================================================================
-25. API KEYS & SECRETS REFERENCE
+27. API KEYS & SECRETS REFERENCE
 ================================================================================
 
 All secrets are set in HuggingFace Space Settings → Variables and Secrets.
@@ -2433,7 +3749,7 @@ REST APIs need no auth key; SQLite is local).
 
 
 ================================================================================
-26. HOW TO RE-RUN EVERYTHING FROM SCRATCH
+28. HOW TO RE-RUN EVERYTHING FROM SCRATCH
 ================================================================================
 
 If you need to rebuild the entire pipeline (e.g., new PDFs are added):
