@@ -25,9 +25,13 @@ echo ""
 module purge
 
 # Activate conda environment using hardcoded path (avoids module conflict with Python)
+# NOTE: bean_llm's own python3 binary was found broken (dangling symlink to a
+# python3.10 file no longer present in that env) on 2026-08-05 — using ptgpu
+# instead, same as generate_embeddings.sb (see ERROR 19 in DOCUMENTATION_INDEX.txt).
+# If bean_llm gets repaired/recreated, switch this back.
 CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate /mnt/scratch/kodumuru/conda/envs/bean_llm
+conda activate /mnt/home/kodumuru/.conda/envs/ptgpu
 
 # Print environment info
 echo "Python version:"
@@ -48,7 +52,7 @@ mkdir -p vector_db logs
 
 # Set environment variables
 export PYTHONUNBUFFERED=1
-export LD_LIBRARY_PATH=/mnt/scratch/kodumuru/conda/envs/bean_llm/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/mnt/home/kodumuru/.conda/envs/ptgpu/lib:$LD_LIBRARY_PATH
 
 # Run vector store builder
 echo "Building vector store..."

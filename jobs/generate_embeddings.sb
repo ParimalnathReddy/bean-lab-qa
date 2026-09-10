@@ -29,9 +29,14 @@ echo ""
 module purge
 
 # Activate conda environment using hardcoded path (avoids module conflict with Python)
+# NOTE: bean_llm's own python3 binary was found broken (dangling symlink to a
+# python3.10 file no longer present in that env) on 2026-08-05 — using ptgpu
+# instead, which already had a working torch+CUDA install; sentence-transformers,
+# chromadb, and rank-bm25 were added to it. If bean_llm gets repaired/recreated,
+# switch this back.
 CONDA_BASE="/opt/software-current/2023.06/x86_64/generic/software/Miniforge3/25.11.0-1"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate /mnt/scratch/kodumuru/conda/envs/bean_llm
+conda activate /mnt/home/kodumuru/.conda/envs/ptgpu
 
 # Print environment info
 echo "Python version:"
@@ -61,7 +66,7 @@ mkdir -p data logs
 export PYTHONUNBUFFERED=1
 
 # Fix libstdc++ compatibility issue (conda env needs newer version than system provides)
-export LD_LIBRARY_PATH=/mnt/scratch/kodumuru/conda/envs/bean_llm/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/mnt/home/kodumuru/.conda/envs/ptgpu/lib:$LD_LIBRARY_PATH
 
 # Set cache directory to scratch to avoid filling home directory
 export HF_HOME=/mnt/scratch/$USER/llm_cache/huggingface
