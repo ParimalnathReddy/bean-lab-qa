@@ -4,7 +4,7 @@
 > verified against the code — not as originally designed, not as a changelog
 > claims. If anything here conflicts with `DOCUMENTATION_INDEX.txt` or a
 > README, THIS FILE WINS; go re-verify and fix the older doc instead of
-> trusting it. Last verified against source: 2026-08-14.
+> trusting it. Last verified against source: 2026-09-10.
 
 ## What this project does
 
@@ -22,7 +22,7 @@ unsupported claims before showing it. Live at
 |---|---|---|---|
 | `src/` | main GitHub repo (`ParimalnathReddy/bean-lab-qa`) | Batch/offline pipeline + shared logic | Used by `qa_with_ollama.py`, `eval_qa.py`, `eval_ragas.py`. No web UI. |
 | `hf_space/` | **its own separate git remote** (`huggingface.co/spaces/Parimalanath/bean-lab-qa`), also mirrored into the main repo | **LIVE — this is the deployed app** | `git -C hf_space push` is what actually ships changes to users. Pushing in the main repo does NOT touch the Space. |
-| `deploy/` | main GitHub repo only | **Not deployed anywhere** — confirmed via a Hugging Face Hub search: the account has exactly one Space, and it's `hf_space/`'s | Single-model (Qwen via HF InferenceClient) standalone alternative. Currently has **uncommitted local changes** (Change 16's safety-check port) sitting in the working tree. |
+| `deploy/` | main GitHub repo only | **Not deployed anywhere** — confirmed via a Hugging Face Hub search: the account has exactly one Space, and it's `hf_space/`'s | Single-model (Qwen via HF InferenceClient) standalone alternative. Change 16's safety-check port is now committed (`08c6151`), but the app is still not deployed anywhere — this is a code-availability fact, not a "still uncommitted" one anymore. |
 
 `hf_space/query_router.py` and `hf_space/prompts.py` are kept **byte-identical**
 to their `src/` counterparts (verified via `diff`, 2026-08-14). `hf_space/retriever.py`
@@ -52,9 +52,12 @@ independently; don't assume they match without checking.
    isn't `SUPPORTED`, no structured-data rows rescue it, and GraphRAG data is
    actually available.
 5. **Generate** — `call_llm()`: Gemini → Groq primary → Groq fallback →
-   OpenRouter → Together, first success wins. Model IDs have safe defaults
-   but are overridable through Space environment variables (see
-   `docs/configuration.md`) because provider-side model availability changes.
+   OpenRouter → Together, first success wins. Model IDs are overridable
+   through Space environment variables (see `docs/configuration.md`) because
+   provider-side model availability changes — and has already broken
+   production twice in one month (2026-08 and 2026-09, see
+   `docs/CHANGELOG.md` Changes 18/19). Treat the current hardcoded defaults
+   as provisional, not permanent — see "Known problems" below.
 6. **Verify** — a second Gemini call checks every claim against retrieved
    context (faithfulness footer); a separate, free (no LLM) regex+dict check
    validates any gene/locus mentions. Both soft-fail — they only ever append
@@ -70,20 +73,35 @@ bite you:
   sets `OPENAI_BASE_URL`, which those SDKs silently honor, redirecting calls
   to HF's paid router (`402 Payment Required`).
 
-## Known problems (verified 2026-08-14, not assumed)
+## Known problems (verified 2026-09-10, not assumed)
 
+- **The exposed Gemini API key (2026-08-14 incident) still needs rotation.**
+  The code fix (sanitized errors) is live and verified, but a code fix is
+  not credential rotation — the key was shown in a public chat UI at least
+  once and should be treated as compromised. This is a manual step in
+  Google AI Studio / Cloud Console that no one has confirmed doing.
+- **Hardcoded generation model IDs are a recurring, proven failure mode, not
+  a one-off.** Twice in one month (2026-08-14 → Change 18, 2026-09-10 →
+  Change 19), a provider retired/deprecated a model this system called by a
+  fixed default, and both times it silently broke the entire generation
+  waterfall until someone happened to trigger and investigate the sanitized
+  "all providers unavailable" message. There's no automated check that
+  catches this before a real user does — this is a real, unaddressed gap in
+  monitoring, not just a config problem. See `docs/decisions.md` for the
+  "verify a replacement model ID against the provider's own source, never a
+  general web search" lesson from Change 19 — that discipline matters again
+  the next time this happens, and it will happen again.
 - **`gene_index.pkl` and `trial_data.db` were never uploaded** to the
   `Parimalanath/bean-lab-vector-db` dataset repo — confirmed against its live
   file listing. Gene validation degrades to allowlist-only (classical
   symbols like Co-1 still work; NCBI/UniProt cross-referencing doesn't).
   Structured trial-data lookup returns empty on every call. Both are fully
-  coded and tested — this is a deployment gap, not a code gap.
+  coded and tested — this is a deployment gap, not a code gap. Unchanged
+  this session — still open.
 - **Query logging is broken** — the `Parimalanath/bean-lab-query-logs`
   dataset repo was never created; `_flush()`'s upload has been silently
-  failing since it was written. No usage telemetry exists.
-- **`deploy/app.py` has uncommitted local changes** (Change 16's safety-check
-  parity work) sitting in the working tree, never committed or pushed
-  anywhere.
+  failing since it was written. No usage telemetry exists. Unchanged this
+  session — still open.
 - **A project-local `envs/bean_llm/` directory exists** (this repo's own
   `envs/bean_llm/bin/python3.10`, real binary, dated May 18 2026) that is
   **not referenced anywhere** in prior documentation or in the incident
@@ -142,18 +160,59 @@ bite you:
   `build_gene_index.py`, `build_vector_store.py`,
   `extract_structured_data.py`) — don't reintroduce a different filename
   convention without updating all of them.
+- **Never log only `str(requests.HTTPError))` when diagnosing a provider
+  call failure.** It's just `"{status} {reason} for url: {url}"` — never the
+  response body, which is usually the only place a provider states *why* a
+  call failed. `_sanitize_provider_error()` (`hf_space/app.py`) appends up
+  to 300 redacted characters of the body for exactly this reason; don't
+  strip that back down to just the status line.
+- **Never pick a replacement provider model ID from a general web search
+  alone.** Confirm it against the provider's own error response or
+  official docs/deprecations page first. A general search returned an
+  inconsistent, likely-hallucinated model lineup during the Change 19
+  investigation; the provider's own sources were correct and consistent.
+- **Never blend retrieval-quality and generation-quality into one
+  evaluation score.** `eval_qa.py`/`eval_ragas.py` report them as two
+  separate layers on purpose (Change 20, see `docs/decisions.md`) — a
+  single blended number hides which half of the pipeline actually needs
+  attention.
 
 ## Current goals / work in progress
 
-- Nothing is mid-flight as of this writing — Change 17 (wiring
-  `paper_metadata.db` into routing) and the same-day security fix are both
-  shipped and verified live.
-- Natural next candidates, not yet started: uploading `gene_index.pkl` and
-  `trial_data.db` to actually activate those two dormant subsystems;
-  re-validating the confidence-label distance thresholds
-  (0.45/0.65/0.85) against the current `bge-large-en-v1.5` embedding space
-  (never re-validated since the embedding-model upgrade); fixing query
-  logging.
+**Recently completed (this session, 2026-09-10):**
+- Diagnosed and fixed a live all-providers-failed incident: Change 18's own
+  replacement model IDs (`gemini-2.5-flash`, two Groq Llama models) had
+  themselves already been deprecated/retired by the time the fix was
+  deployed. Root-caused via real Space logs
+  (`HfApi().fetch_space_logs()`) plus a diagnostic patch to capture
+  provider response bodies (previously only the HTTP status was logged),
+  then fixed with model IDs confirmed against each provider's own error
+  response / docs page — not guessed. Verified live with the exact
+  originally-failing query. See Changes 18–19 in `docs/CHANGELOG.md`.
+- Committed six sessions' worth of pending work that had been sitting
+  uncommitted in the main repo (Changes 9, 14, 16, 17, the `ptgpu`
+  environment fix, and this shared `docs/` system itself) — the main repo
+  is now clean except for gitignored-in-spirit `data/`/`Graph_files/`.
+- Built this shared `docs/` system (`current-state.md`, `architecture.md`,
+  `configuration.md`, `decisions.md`, `CHANGELOG.md`) plus `CLAUDE.md`/
+  `AGENTS.md`, consolidating knowledge that previously existed only in
+  `DOCUMENTATION_INDEX.txt` and conversation history.
+- Separated retrieval-quality and generation-quality scoring in both eval
+  scripts into two independent, never-blended layers (Change 20) — see
+  `docs/decisions.md`.
+
+**Not started, real next candidates:**
+- Rotate the exposed Gemini API key (2026-08-14 incident) — manual,
+  human-only step, still outstanding.
+- Add a way to catch a provider model deprecation before a real user does —
+  no monitoring/alerting exists today; this has now broken production
+  twice.
+- Upload `gene_index.pkl` and `trial_data.db` to activate those two dormant
+  subsystems.
+- Re-validate the confidence-label distance thresholds (0.45/0.65/0.85)
+  against the current `bge-large-en-v1.5` embedding space — never
+  re-validated since the embedding-model upgrade.
+- Fix query logging (dataset repo was never created).
 
 ## Where to look next
 

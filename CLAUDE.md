@@ -87,6 +87,16 @@ this file or into `AGENTS.md`.
   `stage` reaching `RUNNING` (not `BUILD_ERROR`/`RUNTIME_ERROR`) before
   considering a deploy verified — background the poll rather than blocking
   on it if other work can proceed meanwhile.
+- **When a live-Space bug report doesn't reveal its cause from the user-facing
+  error alone** (which it usually won't — see Security below), pull the
+  actual container logs instead of guessing at a fix:
+  `HfApi().fetch_space_logs("Parimalanath/bean-lab-qa")` (Python,
+  `huggingface_hub`) streams them directly. This is how a real
+  all-providers-failed incident was root-caused to a specific provider 404
+  in 2026-09 — guessing a fix without this would have meant redeploying
+  blind. If the logged error still isn't enough to diagnose (e.g. a bare
+  HTTP status with no body), that's itself a sign to improve the logging
+  first, redeploy, then re-pull logs — not to guess further.
 
 ## Security
 

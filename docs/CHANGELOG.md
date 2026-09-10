@@ -160,6 +160,26 @@ context scored `answer_rubric_coverage=1.0` while
 `retrieval_rubric_coverage=0.0` — exactly the case a single blended score
 would have hidden entirely. See `docs/decisions.md`.
 
+**21 — Shared documentation system (`docs/`, `CLAUDE.md`, `AGENTS.md`).**
+Project knowledge previously lived only in `DOCUMENTATION_INDEX.txt` (an
+exhaustive but chronological, 3,800+ line build log) and in conversation
+history with no persistent record. No `CLAUDE.md` existed before this.
+Reorganized into `docs/current-state.md` (read-first snapshot),
+`docs/architecture.md` (mechanism-level), `docs/configuration.md`
+(env vars/secrets/defaults, verified against the actual code),
+`docs/decisions.md` (why things are built the way they are, with
+don't-revert-without-reconsidering notes), and this file. `CLAUDE.md` and
+`AGENTS.md` are now Claude/Codex-specific instruction files only — working
+discipline, git-repo structure, security rules, when to update `docs/` —
+with no project knowledge duplicated into either; both point to `docs/` as
+the single shared source of truth for both agents.
+`DOCUMENTATION_INDEX.txt` is retained as-is for deep historical detail
+that didn't need distilling. As part of this, six commits' worth of
+previously-uncommitted work already sitting in the main repo's working
+tree (Changes 9, 14, 16, 17, the `ptgpu` environment fix) were finally
+committed and pushed — none of that was newly written, it had just never
+been checked in.
+
 **Unnumbered — same-day security fix (2026-08-14).** A real user query
 (a broad species/methodology filter matching 128 papers) inflated a prompt
 past Groq's payload limit; the resulting all-providers-failed error

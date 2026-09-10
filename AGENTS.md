@@ -50,6 +50,16 @@ pushing in the main repo does not deploy anything. Only pushing to the
 edit to either (verify with `diff`); `hf_space/retriever.py` is a known,
 accepted exception that has already diverged from `src/retriever.py`.
 
+When a live-Space bug report doesn't reveal its cause from the user-facing
+error alone (it usually won't, by design — see Security below), pull the
+actual container logs before guessing at a fix:
+`HfApi().fetch_space_logs("Parimalanath/bean-lab-qa")` (Python,
+`huggingface_hub`). A real all-providers-failed incident was root-caused
+this way in 2026-09 — a fix deployed without checking the real logs would
+have been another guess. If the logged error still isn't enough to
+diagnose, improve the logging, redeploy, then re-pull logs — don't keep
+guessing.
+
 ## Security
 
 Never let a caught exception's raw text (which can embed request URLs, and
