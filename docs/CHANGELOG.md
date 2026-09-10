@@ -143,6 +143,23 @@ inconsistent, likely-partly-hallucinated model lineup (Gemini "3.5" through
 "3.8" flash variants) before the provider's own error response and docs
 page resolved it authoritatively.
 
+**20 — Separate retrieval quality from generation quality in evaluation.**
+Both eval scripts previously risked conflating "the answer is good" with
+"retrieval found the right evidence" into one number.
+`eval_qa.py`'s `score_answer()` now checks rubric keywords against the
+retrieved context and the final answer independently
+(`retrieval_rubric_coverage` / `answer_rubric_coverage`), plus
+`unsupported_rubric_items` (answer claims with no retrieved support) and
+`dropped_rubric_items` (retrieved evidence the answer didn't use).
+`eval_ragas.py`'s aggregate/by-category report now nests its existing
+metrics under explicit `"retrieval"` and `"generation"` keys instead of a
+flat list — the underlying RAGAS metrics were already correctly separated,
+only the reporting structure wasn't. Verified with a direct test against
+the real `score_answer()`: a hallucinated-but-fluent answer over irrelevant
+context scored `answer_rubric_coverage=1.0` while
+`retrieval_rubric_coverage=0.0` — exactly the case a single blended score
+would have hidden entirely. See `docs/decisions.md`.
+
 **Unnumbered — same-day security fix (2026-08-14).** A real user query
 (a broad species/methodology filter matching 128 papers) inflated a prompt
 past Groq's payload limit; the resulting all-providers-failed error

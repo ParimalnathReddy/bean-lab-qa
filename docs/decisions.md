@@ -7,6 +7,64 @@ the line that looks wrong in isolation.
 
 ---
 
+## Retrieval and generation are scored as two independent layers, never
+## blended into one number (Change 20)
+
+**Decision**: both evaluation scripts report retrieval quality and
+generation quality as separate, clearly labeled numbers — never averaged
+or folded into a single score.
+
+- `eval_qa.py`: `score_answer()` now checks rubric keywords against the
+  **retrieved context** (`retrieval_rubric_coverage`) and against the
+  **final answer** (`answer_rubric_coverage`) independently, plus two
+  cross-referencing counts — `unsupported_rubric_items` (in the answer, not
+  in retrieved context — a claim with no visible supporting evidence) and
+  `dropped_rubric_items` (in retrieved context, not in the answer —
+  evidence the generation step didn't use).
+- `eval_ragas.py`: the `aggregate` and `by_category` report structures are
+  now nested under explicit `"retrieval"` (`context_precision_no_ref`,
+  `context_precision`, `context_recall`) and `"generation"`
+  (`faithfulness`, `answer_relevancy`) keys, and the printed summary shows
+  them as two visually separated sections. The underlying RAGAS metrics
+  didn't change — they were already correctly separated by RAGAS's own
+  taxonomy — only the reporting structure did, since a flat list of five
+  numbers invites averaging them together in your head regardless of what
+  each one actually measures.
+
+**Why**: the *original* `eval_qa.py` checked rubric keywords against the
+answer only, which conflates two genuinely different failure modes into
+one number: retrieval never finding the evidence, vs. retrieval finding it
+and generation phrasing it differently. Worse, it can't catch the reverse
+case at all — a fluent, plausible-sounding answer that happens to use the
+right keywords despite retrieval having found nothing relevant, which
+scores as if it were a correct answer. Verified directly, not just argued
+in the abstract: a synthetic test case with a hallucinated-but-fluent
+answer over irrelevant retrieved context scored `answer_rubric_coverage =
+1.0` under the new split while `retrieval_rubric_coverage = 0.0` — under
+the old single-score design, that 1.0 was the *only* number that existed,
+so a total retrieval failure would have looked like a perfect answer. A
+bad final answer can come from good retrieval (a faithfulness/prompting
+problem); good-sounding wording can hide bad retrieval (a hallucination
+risk). Optimizing against one blended number risks tuning the wrong
+component of the pipeline for either failure mode.
+
+**Affects**: `src/eval_qa.py`'s `score_answer()` return schema (renamed
+`rubric_coverage` → `retrieval_rubric_coverage`/`answer_rubric_coverage`,
+two new count fields) and `data/eval_results.json`'s `aggregate`/
+`by_category` shape; `src/eval_ragas.py`'s `data/ragas_results.json`
+`aggregate`/`by_category` shape (now nested, was flat). Any downstream
+script or notebook reading either output file's old flat keys needs
+updating.
+
+**Don't**: add a single composite "quality score" that averages retrieval
+and generation metrics together — that's exactly the thing this change
+undid. If a single top-line number is ever genuinely needed for a
+dashboard or report, compute it as a clearly-labeled *derived* summary on
+top of the two separate layers, never as a replacement for reporting them
+separately.
+
+---
+
 ## Provider error bodies are always logged server-side (truncated, redacted) —
 ## never inferred from HTTP status alone
 

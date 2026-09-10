@@ -53,31 +53,71 @@ from benchmark_questions import BENCHMARK
 
 
 # ── Scoring helpers ────────────────────────────────────────────────────────────
+#
+# Change 20 — retrieval and generation are scored as two INDEPENDENT layers,
+# never blended into one number. The original score_answer() checked rubric
+# keywords against the final ANSWER only, which conflates two different
+# things a rubric miss could mean: retrieval never found the fact, or
+# retrieval found it and generation just phrased it differently. It also
+# can't catch the opposite failure — a fluent, plausible-sounding answer
+# that happens to use the expected keywords despite retrieval never having
+# surfaced that evidence at all (an unsupported/hallucinated claim scoring
+# as if it were correct). Neither failure is visible in a single blended
+# score; both are real risks in a RAG pipeline, and optimizing against one
+# number risks tuning generation to sound right while retrieval quietly
+# stays broken, or vice versa. See docs/decisions.md.
 
-def score_answer(answer: str, rubric: List[str], confidence: str,
-                  expect_low_confidence: bool = False) -> Dict:
+_RUBRIC_STOPWORDS = {"the", "are", "for", "and", "that", "have", "been",
+                      "with", "from", "this"}
+
+
+def _rubric_hits(text: str, rubric: List[str]) -> List[bool]:
+    """Per rubric item: does any 3+ char content word from it appear in `text`?"""
+    text_lower = text.lower()
+    hits = []
+    for item in rubric:
+        words = [w for w in re.findall(r'\b\w{3,}\b', item.lower())
+                  if w not in _RUBRIC_STOPWORDS]
+        hits.append(bool(words) and any(w in text_lower for w in words))
+    return hits
+
+
+def score_answer(answer: str, contexts: List[str], rubric: List[str],
+                  confidence: str, expect_low_confidence: bool = False) -> Dict:
     """
-    Lightweight automated scoring:
-      - rubric_coverage: fraction of rubric items found as keywords in answer
-      - has_doi_citation: answer contains a doi: reference
+    Lightweight automated scoring, retrieval and generation reported
+    separately:
+      - retrieval_rubric_coverage: fraction of rubric items found as keywords
+        ANYWHERE IN THE RETRIEVED CONTEXT — did the correct evidence appear
+        at all? Independent of what the LLM did with it.
+      - answer_rubric_coverage: fraction of rubric items found as keywords in
+        the final ANSWER — the old "rubric_coverage," kept but relabeled so
+        it's never mistaken for a retrieval-quality signal.
+      - unsupported_rubric_items: count of rubric items present in the
+        answer but NOT in retrieved context — claims with no visible
+        supporting evidence, the "good wording hides bad retrieval" case.
+      - dropped_rubric_items: count of rubric items present in retrieved
+        context but NOT in the answer — evidence was available and the
+        generation step didn't use it.
+      - has_doi_citation: answer contains a doi: reference (generation layer)
       - has_confidence_label: answer contains a bracketed confidence label
-      - confidence: retrieval confidence from BeanRetriever
+      - confidence: retrieval confidence from BeanRetriever (retrieval layer)
       - confidence_appropriate: for adversarial questions (expect_low_confidence=True),
         whether the system actually hedged (INFERRED/UNSUPPORTED) rather than
         confidently answering about a fabricated gene/cultivar/out-of-scope topic.
         None for non-adversarial questions, where this check doesn't apply.
     """
     answer_lower = answer.lower()
+    context_text = " ".join(contexts)
 
-    # Check rubric keyword coverage (coarse heuristic)
-    rubric_hits = 0
-    for item in rubric:
-        # If any 3+ char word from the rubric appears in the answer, count it
-        words = [w for w in re.findall(r'\b\w{3,}\b', item.lower()) if w not in
-                 {"the", "are", "for", "and", "that", "have", "been", "with", "from", "this"}]
-        if words and any(w in answer_lower for w in words):
-            rubric_hits += 1
-    coverage = round(rubric_hits / len(rubric), 2) if rubric else 0.0
+    retrieval_hits = _rubric_hits(context_text, rubric)
+    answer_hits = _rubric_hits(answer_lower, rubric)
+
+    retrieval_coverage = round(sum(retrieval_hits) / len(rubric), 2) if rubric else 0.0
+    answer_coverage = round(sum(answer_hits) / len(rubric), 2) if rubric else 0.0
+
+    unsupported = sum(1 for r, a in zip(retrieval_hits, answer_hits) if a and not r)
+    dropped = sum(1 for r, a in zip(retrieval_hits, answer_hits) if r and not a)
 
     has_doi  = bool(re.search(r'doi:\s*10\.\d{4,}', answer_lower))
     has_conf = bool(re.search(r'\[(supported|partially_supported|inferred|unsupported)\]',
@@ -88,7 +128,10 @@ def score_answer(answer: str, rubric: List[str], confidence: str,
         confidence_appropriate = confidence in ("INFERRED", "UNSUPPORTED")
 
     return {
-        "rubric_coverage": coverage,
+        "retrieval_rubric_coverage": retrieval_coverage,
+        "answer_rubric_coverage": answer_coverage,
+        "unsupported_rubric_items": unsupported,
+        "dropped_rubric_items": dropped,
         "has_doi_citation": has_doi,
         "has_confidence_label": has_conf,
         "retrieval_confidence": confidence,
@@ -157,8 +200,10 @@ def main():
             )
             elapsed = time.time() - t0
 
+            contexts = [s["text"] for s in result["sources"] if s.get("text")]
             scores = score_answer(
                 result["answer"],
+                contexts,
                 item["rubric"],
                 result["confidence"],
                 expect_low_confidence=item.get("expect_low_confidence", False),
@@ -177,26 +222,58 @@ def main():
             results.append(entry)
 
             cat = item["category"]
-            category_scores.setdefault(cat, []).append(scores["rubric_coverage"])
+            category_scores.setdefault(cat, {"retrieval": [], "answer": []})
+            category_scores[cat]["retrieval"].append(scores["retrieval_rubric_coverage"])
+            category_scores[cat]["answer"].append(scores["answer_rubric_coverage"])
 
             logger.info(f"  Confidence: {result['confidence']}")
-            logger.info(f"  Rubric coverage: {scores['rubric_coverage']:.0%}")
+            logger.info(f"  Retrieval coverage: {scores['retrieval_rubric_coverage']:.0%}  "
+                        f"(evidence present in retrieved context)")
+            logger.info(f"  Answer coverage:    {scores['answer_rubric_coverage']:.0%}  "
+                        f"(evidence present in final answer)")
+            if scores["unsupported_rubric_items"]:
+                logger.info(f"  ⚠ {scores['unsupported_rubric_items']} rubric item(s) in the "
+                            f"answer with no matching retrieved evidence")
+            if scores["dropped_rubric_items"]:
+                logger.info(f"  ⚠ {scores['dropped_rubric_items']} rubric item(s) retrieved "
+                            f"but not used in the answer")
             logger.info(f"  DOI cited: {scores['has_doi_citation']} | "
                         f"Confidence label: {scores['has_confidence_label']}")
 
             print(f"\n[{item['id']}] {item['question'][:80]}...")
             print(f"  Confidence: {result['confidence']} | "
-                  f"Coverage: {scores['rubric_coverage']:.0%} | "
+                  f"Retrieval: {scores['retrieval_rubric_coverage']:.0%} | "
+                  f"Answer: {scores['answer_rubric_coverage']:.0%} | "
                   f"DOI: {scores['has_doi_citation']}")
 
         except Exception as e:
             logger.error(f"  Failed: {e}")
             results.append({**item, "error": str(e)})
 
-    # ── Aggregate statistics ───────────────────────────────────────────────────
+    # ── Aggregate statistics — retrieval and generation kept as separate ────────
+    # layers throughout (Change 20). Never averaged together into one number:
+    # a low retrieval score and a low answer score point at different fixes
+    # (better retrieval/reranking vs. better prompting/faithfulness), and a
+    # blended number would hide which one actually needs attention.
     successful  = [r for r in results if "error" not in r]
     n_ok        = len(successful)
-    avg_coverage = round(sum(r["scores"]["rubric_coverage"] for r in successful) / n_ok, 3) if n_ok else 0
+
+    avg_retrieval_coverage = (
+        round(sum(r["scores"]["retrieval_rubric_coverage"] for r in successful) / n_ok, 3)
+        if n_ok else 0
+    )
+    avg_answer_coverage = (
+        round(sum(r["scores"]["answer_rubric_coverage"] for r in successful) / n_ok, 3)
+        if n_ok else 0
+    )
+    unsupported_rate = (
+        round(sum(1 for r in successful if r["scores"]["unsupported_rubric_items"] > 0) / n_ok, 3)
+        if n_ok else 0
+    )
+    dropped_rate = (
+        round(sum(1 for r in successful if r["scores"]["dropped_rubric_items"] > 0) / n_ok, 3)
+        if n_ok else 0
+    )
     doi_rate     = round(sum(r["scores"]["has_doi_citation"] for r in successful) / n_ok, 3) if n_ok else 0
     conf_rate    = round(sum(r["scores"]["has_confidence_label"] for r in successful) / n_ok, 3) if n_ok else 0
 
@@ -205,8 +282,13 @@ def main():
         for label in ["SUPPORTED", "PARTIALLY_SUPPORTED", "INFERRED", "UNSUPPORTED"]
     }
 
-    cat_avg = {cat: round(sum(scores) / len(scores), 3)
-               for cat, scores in category_scores.items()}
+    cat_avg = {
+        cat: {
+            "retrieval_rubric_coverage": round(sum(s["retrieval"]) / len(s["retrieval"]), 3),
+            "answer_rubric_coverage": round(sum(s["answer"]) / len(s["answer"]), 3),
+        }
+        for cat, s in category_scores.items()
+    }
 
     adversarial_checked = [
         r["scores"]["confidence_appropriate"] for r in successful
@@ -225,9 +307,19 @@ def main():
         "total_questions": len(questions),
         "successful": n_ok,
         "aggregate": {
-            "avg_rubric_coverage": avg_coverage,
-            "doi_citation_rate": doi_rate,
-            "confidence_label_rate": conf_rate,
+            "retrieval": {
+                "avg_rubric_coverage": avg_retrieval_coverage,
+                "note": "did the correct evidence appear in retrieved context?",
+            },
+            "generation": {
+                "avg_rubric_coverage": avg_answer_coverage,
+                "unsupported_claim_rate": unsupported_rate,
+                "evidence_dropped_rate": dropped_rate,
+                "doi_citation_rate": doi_rate,
+                "confidence_label_rate": conf_rate,
+                "note": "did the answer faithfully use retrieved evidence, "
+                        "without inventing content retrieval never surfaced?",
+            },
             "adversarial_appropriate_hedge_rate": adversarial_hedge_rate,
         },
         "by_category": cat_avg,
@@ -241,7 +333,12 @@ def main():
 
     logger.info(f"\n{'='*70}")
     logger.info(f"Evaluation complete — {n_ok}/{len(questions)} answered")
-    logger.info(f"Avg rubric coverage:    {avg_coverage:.1%}")
+    logger.info(f"RETRIEVAL  avg coverage:        {avg_retrieval_coverage:.1%}")
+    logger.info(f"GENERATION avg coverage:        {avg_answer_coverage:.1%}")
+    logger.info(f"GENERATION unsupported-claim rate: {unsupported_rate:.1%}  "
+                f"(answer states something retrieval never surfaced)")
+    logger.info(f"GENERATION evidence-dropped rate:  {dropped_rate:.1%}  "
+                f"(retrieval found it, answer didn't use it)")
     logger.info(f"DOI citation rate:      {doi_rate:.1%}")
     logger.info(f"Confidence label rate:  {conf_rate:.1%}")
     if adversarial_hedge_rate is not None:
@@ -254,16 +351,22 @@ def main():
 
     print(f"\n{'='*70}")
     print(f"EVALUATION SUMMARY")
-    print(f"  Successful:           {n_ok}/{len(questions)}")
-    print(f"  Avg rubric coverage:  {avg_coverage:.1%}")
-    print(f"  DOI citation rate:    {doi_rate:.1%}")
-    print(f"  Confidence labels:    {conf_rate:.1%}")
+    print(f"  Successful:                {n_ok}/{len(questions)}")
+    print(f"\n  RETRIEVAL LAYER — did the correct evidence appear?")
+    print(f"    Avg coverage:            {avg_retrieval_coverage:.1%}")
+    print(f"\n  GENERATION LAYER — did the answer faithfully use that evidence?")
+    print(f"    Avg coverage:            {avg_answer_coverage:.1%}")
+    print(f"    Unsupported-claim rate:  {unsupported_rate:.1%}  (stated, not retrieved)")
+    print(f"    Evidence-dropped rate:   {dropped_rate:.1%}  (retrieved, not stated)")
+    print(f"    DOI citation rate:       {doi_rate:.1%}")
+    print(f"    Confidence labels:       {conf_rate:.1%}")
     if adversarial_hedge_rate is not None:
-        print(f"  Adversarial hedge rate: {adversarial_hedge_rate:.1%} "
+        print(f"    Adversarial hedge rate:  {adversarial_hedge_rate:.1%} "
               f"(of {len(adversarial_checked)} adversarial questions)")
-    print(f"\n  By category:")
-    for cat, score in cat_avg.items():
-        print(f"    {cat:<25} {score:.1%}")
+    print(f"\n  By category (retrieval | generation):")
+    for cat, scores in cat_avg.items():
+        print(f"    {cat:<25} {scores['retrieval_rubric_coverage']:.0%}  |  "
+              f"{scores['answer_rubric_coverage']:.0%}")
     print(f"\n  Confidence distribution: {conf_dist}")
     print(f"{'='*70}")
 

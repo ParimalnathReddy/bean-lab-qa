@@ -324,21 +324,42 @@ def main():
                 "context_recall": None, "had_ground_truth": False,
             })
 
+    # Change 20: reported as two independent layers, never blended into one
+    # score. RAGAS's own metric taxonomy already separates these cleanly --
+    # context_precision*/context_recall judge the RETRIEVED CONTEXT alone
+    # (would this evidence support a good answer, regardless of what the LLM
+    # actually wrote), faithfulness/answer_relevancy judge the ANSWER against
+    # that context. What was missing wasn't the metrics, it was reporting
+    # them as one flat list of five numbers instead of two clearly-labeled
+    # layers -- easy to eyeball as a single blob and average together in your
+    # head, which is exactly the mixing this change is meant to prevent. A
+    # low retrieval score and a low generation score point at different
+    # fixes (reranking/retrieval tuning vs. prompting/faithfulness), so they
+    # stay visually and structurally separate all the way through this
+    # report. See docs/decisions.md.
     aggregate = {
-        "faithfulness": _nanmean([r["faithfulness"] for r in results]),
-        "answer_relevancy": _nanmean([r["answer_relevancy"] for r in results]),
-        "context_precision_no_ref": _nanmean([r["context_precision_no_ref"] for r in results]),
-        "context_precision": _nanmean([r["context_precision"] for r in results]),
-        "context_recall": _nanmean([r["context_recall"] for r in results]),
+        "retrieval": {
+            "context_precision_no_ref": _nanmean([r["context_precision_no_ref"] for r in results]),
+            "context_precision": _nanmean([r["context_precision"] for r in results]),
+            "context_recall": _nanmean([r["context_recall"] for r in results]),
+        },
+        "generation": {
+            "faithfulness": _nanmean([r["faithfulness"] for r in results]),
+            "answer_relevancy": _nanmean([r["answer_relevancy"] for r in results]),
+        },
     }
 
     by_category = {}
     for cat in sorted({r["category"] for r in results}):
         cat_rows = [r for r in results if r["category"] == cat]
         by_category[cat] = {
-            "faithfulness": _nanmean([r["faithfulness"] for r in cat_rows]),
-            "answer_relevancy": _nanmean([r["answer_relevancy"] for r in cat_rows]),
-            "context_precision_no_ref": _nanmean([r["context_precision_no_ref"] for r in cat_rows]),
+            "retrieval": {
+                "context_precision_no_ref": _nanmean([r["context_precision_no_ref"] for r in cat_rows]),
+            },
+            "generation": {
+                "faithfulness": _nanmean([r["faithfulness"] for r in cat_rows]),
+                "answer_relevancy": _nanmean([r["answer_relevancy"] for r in cat_rows]),
+            },
         }
 
     output = {
@@ -372,14 +393,19 @@ def main():
     print(f"\n{'=' * 70}")
     print("RAGAS EVALUATION SUMMARY")
     print(f"  Questions answered:       {len(answerable)}/{len(questions)}")
-    print(f"  Faithfulness:             {aggregate['faithfulness']}")
-    print(f"  Answer relevancy:         {aggregate['answer_relevancy']}")
-    print(f"  Context precision*:       {aggregate['context_precision_no_ref']}  (*reference-free variant)")
+    print(f"\n  RETRIEVAL LAYER — did the correct evidence appear?")
+    print(f"    Context precision*:     {aggregate['retrieval']['context_precision_no_ref']}  (*reference-free variant)")
     if grounded:
-        print(f"  Context precision (ref):  {aggregate['context_precision']}")
-        print(f"  Context recall:           {aggregate['context_recall']}")
+        print(f"    Context precision (ref): {aggregate['retrieval']['context_precision']}")
+        print(f"    Context recall:          {aggregate['retrieval']['context_recall']}")
     else:
-        print("  Context recall:           N/A — no questions have ground_truth populated yet")
+        print("    Context recall:          N/A — no questions have ground_truth populated yet")
+    print(f"\n  GENERATION LAYER — did the answer faithfully use that evidence?")
+    print(f"    Faithfulness:           {aggregate['generation']['faithfulness']}")
+    print(f"    Answer relevancy:       {aggregate['generation']['answer_relevancy']}")
+    print(f"\n  A low retrieval score points at retrieval/reranking; a low")
+    print(f"  generation score points at prompting/faithfulness — read them")
+    print(f"  separately, don't average them together.")
     print(f"{'=' * 70}")
 
 
